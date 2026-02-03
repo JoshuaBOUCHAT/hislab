@@ -12,7 +12,8 @@
 //! let idx = slab.insert(42);
 //! assert_eq!(slab[idx], 42);
 //!
-//! slab.remove(idx);
+//! let val = slab.remove(idx);
+//! assert_eq!(val, Some(42));
 //! assert!(slab.get(idx).is_none());
 //! ```
 
@@ -123,13 +124,13 @@ impl<T> HiSlab<T> {
     fn finalize_insert(&mut self, block_idx: usize, bit_idx: usize, val: T) -> u32 {
         let final_idx = (block_idx * 512 + bit_idx) as u32;
 
-        // Écriture de la donnée
+        // Écriture de la donnée (ptr::write pour éviter de drop l'ancienne valeur non-initialisée)
         if (final_idx as usize) < self.data.len() {
             unsafe {
-                *self.data.get_unchecked_mut(final_idx as usize) = val;
+                std::ptr::write(self.data.as_mut_ptr().add(final_idx as usize), val);
             }
         } else {
-            self.data.push(val); // Simplifié, idéalement reserve() avant
+            self.data.push(val);
         }
 
         // Propagation de l'occupation
@@ -160,21 +161,25 @@ impl<T> HiSlab<T> {
         }
     }
 
-    /// Removes the element at the given index.
+    /// Removes the element at the given index and returns it, or `None` if the slot is empty.
     ///
     /// The slot becomes available for future insertions.
-    pub fn remove(&mut self, idx: u32) {
-        let idx = idx as usize;
-        let l1_block_idx = idx / 512;
-        let l1_bit_idx = idx % 512;
+    pub fn remove(&mut self, idx: u32) -> Option<T> {
+        if !self.is_occupied(idx) {
+            return None;
+        }
+
+        let idx_usize = idx as usize;
+        let l1_block_idx = idx_usize / 512;
+        let l1_bit_idx = idx_usize % 512;
 
         // On libère le bit. Si le bloc était plein, on doit prévenir le parent.
         if self.lvl1[l1_block_idx].clear_bit_and_was_full(l1_bit_idx) {
             self.propagate_empty(l1_block_idx);
         }
 
-        // Optionnel : Drop de la donnée ou remplacement par un bit pattern "empty"
-        // self.data[idx] = ...
+        // Extraction de la valeur sans bouger les autres éléments
+        Some(unsafe { std::ptr::read(self.data.as_ptr().add(idx_usize)) })
     }
 
     fn propagate_empty(&mut self, l1_block_idx: usize) {
@@ -425,14 +430,49 @@ impl<T> IntoIterator for HiSlab<T> {
     type Item = (u32, T);
     type IntoIter = SlabIntoIter<T>;
 
-    fn into_iter(self) -> Self::IntoIter {
+    fn into_iter(mut self) -> Self::IntoIter {
         let first_word = self.lvl1.get(0).map(|b| b.data[0]).unwrap_or(0);
+
+        // Take ownership des champs avant que Drop ne run
+        let data = std::mem::take(&mut self.data);
+        let lvl1 = std::mem::take(&mut self.lvl1);
+
+        // Empêcher Drop de run (les champs sont maintenant vides)
+        std::mem::forget(self);
+
         SlabIntoIter {
-            data: self.data,
-            lvl1: self.lvl1,
+            data,
+            lvl1,
             block_idx: 0,
             word_idx: 0,
             current_word: first_word,
+        }
+    }
+}
+
+impl<T> Drop for HiSlab<T> {
+    fn drop(&mut self) {
+        // Drop seulement les éléments occupés
+        for (b_idx, block) in self.lvl1.iter().enumerate() {
+            for (w_idx, &word) in block.data.iter().enumerate() {
+                if word == 0 {
+                    continue;
+                }
+                let mut temp_word = word;
+                let base_idx = (b_idx << 9) | (w_idx << 6);
+                while temp_word != 0 {
+                    let bit = temp_word.trailing_zeros();
+                    let final_idx = base_idx | (bit as usize);
+                    unsafe {
+                        std::ptr::drop_in_place(self.data.as_mut_ptr().add(final_idx));
+                    }
+                    temp_word &= temp_word - 1;
+                }
+            }
+        }
+        // Éviter que Vec::drop ne redrop les éléments
+        unsafe {
+            self.data.set_len(0);
         }
     }
 }
