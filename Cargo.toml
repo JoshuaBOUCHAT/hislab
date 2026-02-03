@@ -1,0 +1,21 @@
+[package]
+name = "hislab"
+version = "0.1.0"
+edition = "2024"
+authors = ["Joshua"]
+description = "A high-performance slab allocator with hierarchical bitmap for O(1) insert/remove operations"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/joshua/hislab"
+documentation = "https://docs.rs/hislab"
+readme = "README.md"
+keywords = ["slab", "allocator", "bitmap", "simd", "data-structure"]
+categories = ["data-structures", "memory-management", "no-std"]
+
+[dependencies]
+
+[features]
+default = []
+
+[profile.release]
+lto = true
+codegen-units = 1
