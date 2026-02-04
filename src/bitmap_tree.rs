@@ -133,7 +133,7 @@ impl BitmapTree {
     }
 
     /// Itère sur tous les bits à 1 avec un callback
-    pub fn for_each_set<F>(&self, mut f: F)
+    pub fn _for_each_set<F>(&self, mut f: F)
     where
         F: FnMut(u32),
     {
