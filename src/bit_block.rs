@@ -68,14 +68,14 @@ impl BitBlock {
     #[target_feature(enable = "neon")]
     unsafe fn is_full_arm_neon(&self) -> bool {
         use std::arch::aarch64::*;
-        let ptr = self.data.as_ptr() as *const uint64x2_t;
+        let ptr = self.data.as_ptr();
 
-        // NEON travaille sur 128 bits, on fait donc 4 itérations
-        // Mais on peut "réduire" les résultats avec des AND binaires
-        let v1 = vld1q_u64(ptr.add(0));
-        let v2 = vld1q_u64(ptr.add(1));
-        let v3 = vld1q_u64(ptr.add(2));
-        let v4 = vld1q_u64(ptr.add(3));
+        // NEON travaille sur 128 bits (2 x u64), on fait donc 4 loads
+        // pour couvrir les 8 x u64 du BitBlock
+        let v1 = vld1q_u64(ptr);           // data[0..2]
+        let v2 = vld1q_u64(ptr.add(2));    // data[2..4]
+        let v3 = vld1q_u64(ptr.add(4));    // data[4..6]
+        let v4 = vld1q_u64(ptr.add(6));    // data[6..8]
 
         let res = vandq_u64(vandq_u64(v1, v2), vandq_u64(v3, v4));
         // vgetq_lane_u64 extrait un u64 du registre NEON
