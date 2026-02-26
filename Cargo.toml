@@ -3,7 +3,7 @@ name = "hislab"
 version = "0.1.3"
 edition = "2024"
 authors = ["Joshua"]
-description = "A high-performance slab allocator with hierarchical bitmap for O(1) insert/remove operations with tagging option"
+description = "A high-performance slab allocator with hierarchical bitmap for O(1) insert/remove operations"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/JoshuaBOUCHAT/hislab"
 documentation = "https://docs.rs/hislab"
@@ -13,12 +13,13 @@ categories = ["data-structures", "memory-management", "no-std"]
 
 
 [dependencies]
+memfd = "0.6.5"
+memmap2 = "0.9.10"
 rand = { version = "0.8", optional = true }
 
 [features]
 default = []
 rand = ["dep:rand"]
-tagged = []
 
 [profile.release]
 lto = true
