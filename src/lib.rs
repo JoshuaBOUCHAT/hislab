@@ -7,7 +7,7 @@
 //! ```
 //! use hislab::HiSlab;
 //!
-//! let mut slab = HiSlab::<i32>::new().unwrap();
+//! let mut slab = HiSlab::<i32>::new(0, 65536).unwrap();
 //!
 //! let idx = slab.insert(42);
 //! assert_eq!(slab[idx], 42);
@@ -19,14 +19,15 @@
 
 use std::ops::{Index, IndexMut};
 
-use memfd::MemfdOptions;
 use memmap2::MmapMut;
+use libc;
 
 use crate::bit_block::BitBlock;
 use crate::bitmap_tree::BitmapTree;
 
 mod bit_block;
 mod bitmap_tree;
+pub mod buffer_slab;
 #[cfg(test)]
 mod test;
 
@@ -43,45 +44,55 @@ mod test;
 /// For tagging support, see [`TaggedHiSlab`].
 pub struct HiSlab<T: 'static> {
     data: *mut T,
+    virtual_capacity: u32,
     pub(crate) tree: BitmapTree,
     mmap: MmapMut,
 }
 
-const SLAB_SIZE: u64 = 1024 * 1024 * 1024; // 1 GiB
-
-pub fn alloc_huge_ref() -> Result<MmapMut, Box<dyn std::error::Error>> {
-    // Try 2 MiB hugepages first (create + truncate + mmap must all succeed).
-    // Any failure at any step falls back to a regular anonymous mapping.
-    let hugetlb = (|| -> Result<MmapMut, Box<dyn std::error::Error>> {
-        let fd = MemfdOptions::new()
-            .hugetlb(Some(memfd::HugetlbSize::Huge2MB))
-            .allow_sealing(true)
-            .create("hislab-huge-ptr")?;
-        fd.as_file().set_len(SLAB_SIZE)?;
-        Ok(unsafe { MmapMut::map_mut(fd.as_file())? })
-    })();
-
-    match hugetlb {
-        Ok(mmap) => Ok(mmap),
-        Err(_) => Ok(MmapMut::map_anon(SLAB_SIZE as usize)?),
-    }
-}
-
-impl<T: Default> HiSlab<T> {
+impl<T> HiSlab<T> {
     /// Creates a new empty `HiSlab`.
-    pub fn new() -> Result<Self, Box<dyn std::error::Error>> {
-        let mmap = alloc_huge_ref()?;
-        // 4. Initialisation (Crucial pour éviter l'UB)
-        // On écrit la valeur par défaut à l'adresse de départ
+    ///
+    /// `virtual_capacity * size_of::<T>()` octets sont réservés immédiatement en espace
+    /// virtuel. Les pages couvrant `initial_capacity` slots sont pré-faultées via
+    /// `madvise(MADV_POPULATE_WRITE)`. Les pages au-delà sont committées à la demande.
+    ///
+    /// # Panics
+    ///
+    /// - Si `initial_capacity > virtual_capacity`
+    /// - Si `virtual_capacity * size_of::<T>()` dépasse `usize::MAX`
+    ///
+    /// # Errors
+    ///
+    /// Retourne une erreur si `mmap` échoue (OOM système).
+    pub fn new(initial_capacity: u32, virtual_capacity: u32) -> Result<Self, std::io::Error> {
+        assert!(
+            initial_capacity <= virtual_capacity,
+            "initial_capacity doit être <= virtual_capacity"
+        );
+
+        let virtual_bytes = (virtual_capacity as usize)
+            .checked_mul(std::mem::size_of::<T>())
+            .expect("virtual_capacity * size_of::<T>() dépasse usize::MAX");
+
+        let mmap = MmapMut::map_anon(virtual_bytes)?;
         let ptr = mmap.as_ptr() as *mut T;
-        unsafe {
-            std::ptr::write(ptr, T::default());
+
+        if initial_capacity > 0 {
+            let initial_bytes = initial_capacity as usize * std::mem::size_of::<T>();
+            unsafe {
+                libc::madvise(
+                    ptr as *mut libc::c_void,
+                    initial_bytes,
+                    libc::MADV_POPULATE_WRITE | libc::MADV_HUGEPAGE,
+                );
+            }
         }
 
         Ok(Self {
             data: ptr,
+            virtual_capacity,
             tree: BitmapTree::new(),
-            mmap: mmap,
+            mmap,
         })
     }
 }
@@ -93,34 +104,10 @@ impl<T> HiSlab<T> {
     /// until it is removed.
     #[inline(always)]
     pub fn insert(&mut self, val: T) -> u32 {
-        // --- FAST PATH (0..512) ---
-        if let Some(bit_idx) = self.tree.lvl1[0].find_first_free() {
-            return self.finalize_insert(0, bit_idx, val);
-        }
-
-        // --- SLOW PATH ---
-        let l1_block_idx = self.tree.find_free_block();
-
-        self.tree.ensure_lvl1(l1_block_idx);
-
-        let bit_idx = self.tree.lvl1[l1_block_idx]
-            .find_first_free()
-            .expect("Hierarchy out of sync");
-
-        self.finalize_insert(l1_block_idx, bit_idx, val)
-    }
-
-    #[inline(always)]
-    fn finalize_insert(&mut self, block_idx: usize, bit_idx: usize, val: T) -> u32 {
-        let final_idx = (block_idx * 512 + bit_idx) as u32;
-
-        unsafe {
-            std::ptr::write(self.data.add(final_idx as usize), val);
-        }
-
-        self.tree.set_bit(final_idx);
-
-        final_idx
+        let idx = self.tree.reserve_free_idx();
+        assert!(idx < self.virtual_capacity, "HiSlab: virtual_capacity épuisée");
+        unsafe { std::ptr::write(self.data.add(idx as usize), val) };
+        idx
     }
 
     /// Removes the element at the given index and returns it, or `None` if the slot is empty.
@@ -661,11 +648,13 @@ pub struct TaggedHiSlab<T: 'static> {
     tagged_tree: BitmapTree,
 }
 
-impl<T: Default> TaggedHiSlab<T> {
+impl<T> TaggedHiSlab<T> {
     /// Creates a new empty `TaggedHiSlab`.
-    pub fn new() -> Result<Self, Box<dyn std::error::Error>> {
+    ///
+    /// Voir [`HiSlab::new`] pour la sémantique de `initial_capacity` et `virtual_capacity`.
+    pub fn new(initial_capacity: u32, virtual_capacity: u32) -> Result<Self, std::io::Error> {
         Ok(Self {
-            inner: HiSlab::new()?,
+            inner: HiSlab::new(initial_capacity, virtual_capacity)?,
             tagged_tree: BitmapTree::new(),
         })
     }

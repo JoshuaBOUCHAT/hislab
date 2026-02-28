@@ -9,7 +9,7 @@ use rand::SeedableRng;
 #[test]
 fn test_basic_insert_delete() {
     let count = (1 << 18) + 1; // 262,144 éléments
-    let mut slab = HiSlab::<u8>::new().expect("can't allocate");
+    let mut slab = HiSlab::<u8>::new(0, 1 << 19).expect("can't allocate");
 
     println!("🚀 Insertion de {} éléments...", count);
 
@@ -47,7 +47,7 @@ fn test_basic_insert_delete() {
 
 #[test]
 fn test_stress_lifecycle() {
-    let mut slab = HiSlab::<u32>::new().expect("can't allocate");
+    let mut slab = HiSlab::<u32>::new(0, 65536).expect("can't allocate");
     let iterations = 10_000;
     let mut indices = Vec::with_capacity(iterations);
 
@@ -103,7 +103,7 @@ fn test_stress_lifecycle() {
 
 #[test]
 fn test_iterator_order_and_stability() {
-    let mut slab = HiSlab::<&str>::new().expect("can't allocate");
+    let mut slab = HiSlab::<&str>::new(0, 65536).expect("can't allocate");
 
     slab.insert("Rust"); // Index 0
     slab.insert("is"); // Index 1
@@ -117,7 +117,7 @@ fn test_iterator_order_and_stability() {
     assert_eq!(iter.next(), Some((2, &"fast")));
     assert_eq!(iter.next(), None);
 
-    let mut slab2 = HiSlab::<&str>::new().expect("can't allocate");
+    let mut slab2 = HiSlab::<&str>::new(0, 65536).expect("can't allocate");
     slab2.insert("A"); // 0
     let idx_b = slab2.insert("B"); // 1
     slab2.insert("C"); // 2
@@ -141,7 +141,7 @@ fn test_iterator_order_and_stability() {
 
 #[test]
 fn test_iter_mut() {
-    let mut slab = HiSlab::<i32>::new().expect("can't allocate");
+    let mut slab = HiSlab::<i32>::new(0, 65536).expect("can't allocate");
 
     slab.insert(10); // 0
     slab.insert(20); // 1
@@ -175,7 +175,7 @@ fn test_into_iter_partial_consumption() {
 
     DROP_COUNT.store(0, Ordering::SeqCst);
 
-    let mut slab = HiSlab::<DropCounter>::new().expect("can't allocate");
+    let mut slab = HiSlab::<DropCounter>::new(0, 65536).expect("can't allocate");
     for _ in 0..10 {
         slab.insert(DropCounter(Arc::new(())));
     }
@@ -196,7 +196,7 @@ fn test_into_iter_partial_consumption() {
 
 #[test]
 fn test_empty_slab_iteration() {
-    let slab = HiSlab::<i32>::new().expect("can't allocate");
+    let slab = HiSlab::<i32>::new(0, 65536).expect("can't allocate");
 
     let mut count = 0;
     for _ in &slab {
@@ -204,7 +204,7 @@ fn test_empty_slab_iteration() {
     }
     assert_eq!(count, 0);
 
-    let slab2 = HiSlab::<i32>::new().expect("can't allocate");
+    let slab2 = HiSlab::<i32>::new(0, 65536).expect("can't allocate");
     let collected: Vec<_> = slab2.into_iter().collect();
     assert!(collected.is_empty());
 }
@@ -217,7 +217,7 @@ fn test_empty_slab_iteration() {
 #[test]
 fn test_random_occupied_basic() {
     let mut rng = rand::rngs::StdRng::seed_from_u64(42);
-    let mut slab = HiSlab::<i32>::new().expect("can't allocate");
+    let mut slab = HiSlab::<i32>::new(0, 65536).expect("can't allocate");
 
     assert!(slab.random_occupied(&mut rng).is_none());
 
@@ -236,7 +236,7 @@ fn test_random_occupied_basic() {
 #[test]
 fn test_random_occupied_with_holes() {
     let mut rng = rand::rngs::StdRng::seed_from_u64(123);
-    let mut slab = HiSlab::<i32>::new().expect("can't allocate");
+    let mut slab = HiSlab::<i32>::new(0, 65536).expect("can't allocate");
 
     for i in 0..100 {
         slab.insert(i);
@@ -258,7 +258,7 @@ fn test_random_occupied_with_holes() {
 #[test]
 fn test_random_occupied_many() {
     let mut rng = rand::rngs::StdRng::seed_from_u64(456);
-    let mut slab = HiSlab::<i32>::new().expect("can't allocate");
+    let mut slab = HiSlab::<i32>::new(0, 65536).expect("can't allocate");
 
     for i in 0..1000 {
         slab.insert(i);
@@ -277,7 +277,7 @@ fn test_random_occupied_many() {
 #[test]
 fn test_random_occupied_unique() {
     let mut rng = rand::rngs::StdRng::seed_from_u64(789);
-    let mut slab = HiSlab::<i32>::new().expect("can't allocate");
+    let mut slab = HiSlab::<i32>::new(0, 65536).expect("can't allocate");
 
     for i in 0..100 {
         slab.insert(i);
@@ -296,7 +296,7 @@ fn test_random_occupied_unique() {
 #[test]
 fn test_random_occupied_unique_overflow() {
     let mut rng = rand::rngs::StdRng::seed_from_u64(999);
-    let mut slab = HiSlab::<i32>::new().expect("can't allocate");
+    let mut slab = HiSlab::<i32>::new(0, 65536).expect("can't allocate");
 
     for i in 0..10 {
         slab.insert(i);
@@ -309,7 +309,7 @@ fn test_random_occupied_unique_overflow() {
 #[cfg(feature = "rand")]
 #[test]
 fn test_count_occupied() {
-    let mut slab = HiSlab::<i32>::new().expect("can't allocate");
+    let mut slab = HiSlab::<i32>::new(0, 65536).expect("can't allocate");
 
     assert_eq!(slab.count_occupied(), 0);
 
@@ -330,7 +330,7 @@ fn test_count_occupied() {
 
 #[test]
 fn test_insert_tagged_basic() {
-    let mut slab = TaggedHiSlab::<i32>::new().expect("can't allocate");
+    let mut slab = TaggedHiSlab::<i32>::new(0, 65536).expect("can't allocate");
 
     let idx1 = slab.insert(100);
     assert!(!slab.is_tagged(idx1));
@@ -347,7 +347,7 @@ fn test_insert_tagged_basic() {
 
 #[test]
 fn test_tag_untag() {
-    let mut slab = TaggedHiSlab::<i32>::new().expect("can't allocate");
+    let mut slab = TaggedHiSlab::<i32>::new(0, 65536).expect("can't allocate");
 
     let idx = slab.insert(42);
     assert!(!slab.is_tagged(idx));
@@ -365,7 +365,7 @@ fn test_tag_untag() {
 
 #[test]
 fn test_remove_clears_tag() {
-    let mut slab = TaggedHiSlab::<i32>::new().expect("can't allocate");
+    let mut slab = TaggedHiSlab::<i32>::new(0, 65536).expect("can't allocate");
 
     let idx = slab.insert_tagged(42);
     assert!(slab.is_tagged(idx));
@@ -377,7 +377,7 @@ fn test_remove_clears_tag() {
 
 #[test]
 fn test_insert_after_tagged_remove() {
-    let mut slab = TaggedHiSlab::<i32>::new().expect("can't allocate");
+    let mut slab = TaggedHiSlab::<i32>::new(0, 65536).expect("can't allocate");
 
     let idx1 = slab.insert_tagged(100);
     slab.remove(idx1);
@@ -390,7 +390,7 @@ fn test_insert_after_tagged_remove() {
 
 #[test]
 fn test_for_each_tagged() {
-    let mut slab = TaggedHiSlab::<i32>::new().expect("can't allocate");
+    let mut slab = TaggedHiSlab::<i32>::new(0, 65536).expect("can't allocate");
 
     for i in 0..10 {
         let idx = slab.insert(i * 10);
@@ -415,7 +415,7 @@ fn test_for_each_tagged() {
 #[test]
 fn test_random_tagged() {
     let mut rng = rand::rngs::StdRng::seed_from_u64(42);
-    let mut slab = TaggedHiSlab::<i32>::new().expect("can't allocate");
+    let mut slab = TaggedHiSlab::<i32>::new(0, 65536).expect("can't allocate");
 
     assert!(slab.random_tagged(&mut rng).is_none());
 
@@ -438,7 +438,7 @@ fn test_random_tagged() {
 #[cfg(feature = "rand")]
 #[test]
 fn test_count_tagged() {
-    let mut slab = TaggedHiSlab::<i32>::new().expect("can't allocate");
+    let mut slab = TaggedHiSlab::<i32>::new(0, 65536).expect("can't allocate");
 
     assert_eq!(slab.count_tagged(), 0);
 
@@ -461,7 +461,7 @@ fn test_count_tagged() {
 #[test]
 fn test_random_tagged_unique() {
     let mut rng = rand::rngs::StdRng::seed_from_u64(789);
-    let mut slab = TaggedHiSlab::<i32>::new().expect("can't allocate");
+    let mut slab = TaggedHiSlab::<i32>::new(0, 65536).expect("can't allocate");
 
     for i in 0..50 {
         slab.insert_tagged(i);
@@ -486,7 +486,7 @@ fn test_random_tagged_unique() {
 
 #[test]
 fn test_iter_tagged() {
-    let mut slab = TaggedHiSlab::<i32>::new().expect("can't allocate");
+    let mut slab = TaggedHiSlab::<i32>::new(0, 65536).expect("can't allocate");
 
     for i in 0..20 {
         if i % 3 == 0 {
@@ -507,7 +507,7 @@ fn test_iter_tagged() {
 
 #[test]
 fn test_iter_tagged_mut() {
-    let mut slab = TaggedHiSlab::<i32>::new().expect("can't allocate");
+    let mut slab = TaggedHiSlab::<i32>::new(0, 65536).expect("can't allocate");
 
     for i in 0..10 {
         if i % 2 == 0 {
@@ -530,7 +530,7 @@ fn test_iter_tagged_mut() {
 
 #[test]
 fn test_retain_tagged() {
-    let mut slab = TaggedHiSlab::<i32>::new().expect("can't allocate");
+    let mut slab = TaggedHiSlab::<i32>::new(0, 65536).expect("can't allocate");
 
     for i in 0..20 {
         slab.insert_tagged(i);
@@ -557,7 +557,7 @@ fn test_retain_tagged_ttl_simulation() {
         ttl: u32,
     }
 
-    let mut slab = TaggedHiSlab::<Entity>::new().expect("can't allocate");
+    let mut slab = TaggedHiSlab::<Entity>::new(0, 65536).expect("can't allocate");
 
     for i in 0..10 {
         slab.insert_tagged(Entity {
@@ -583,7 +583,7 @@ fn test_retain_tagged_ttl_simulation() {
 
 #[test]
 fn test_retain_tag_only() {
-    let mut slab = TaggedHiSlab::<i32>::new().expect("can't allocate");
+    let mut slab = TaggedHiSlab::<i32>::new(0, 65536).expect("can't allocate");
 
     for i in 0..10 {
         slab.insert_tagged(i);

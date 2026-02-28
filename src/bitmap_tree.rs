@@ -28,15 +28,37 @@ impl BitmapTree {
     /// Vérifie si un bit est occupé
     #[inline(always)]
     pub fn is_set(&self, idx: u32) -> bool {
-        let idx = idx as usize;
+        let idx=idx as usize;
         let b_idx = idx >> 9; // / 512
         if b_idx >= self.lvl1.len() {
             return false;
         }
-        let inner = (idx >> 6) & 0x7; // (idx % 512) / 64
-        let bit = idx & 63; // idx % 64
+        self.lvl1[b_idx].is_set(idx&0x1FF)
+    }
 
-        unsafe { (self.lvl1.get_unchecked(b_idx).data.get_unchecked(inner) & (1 << bit)) != 0 }
+    /// Trouve le premier slot libre dans toute la hiérarchie, croît si nécessaire,
+    /// et retourne son index plat. Ne réserve PAS le slot (n'écrit pas le bit).
+    #[inline(always)]
+    pub fn find_free_idx(&mut self) -> u32 {
+        // Fast path : premier bloc lvl1 (slots 0..512)
+        if let Some(bit_idx) = self.lvl1[0].find_first_free() {
+            return bit_idx as u32;
+        }
+        // Slow path : descente hiérarchique avec croissance automatique
+        let block_idx = self.find_free_block();
+        self.ensure_lvl1(block_idx);
+        let bit_idx = self.lvl1[block_idx]
+            .find_first_free()
+            .expect("Hierarchy out of sync");
+        (block_idx * 512 + bit_idx) as u32
+    }
+
+    /// Trouve le premier slot libre, le réserve (set le bit) et retourne son index plat.
+    #[inline(always)]
+    pub fn reserve_free_idx(&mut self) -> u32 {
+        let idx = self.find_free_idx();
+        self.set_bit(idx);
+        idx
     }
 
     /// Trouve le premier bloc libre via la hiérarchie (slow path)
