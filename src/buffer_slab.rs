@@ -167,7 +167,7 @@ impl<const N: usize> BufferSlab<N> {
 
     /// Libère un slot par index. Appelé par `Drop` de [`AutoGuard`].
     #[inline]
-    pub unsafe fn free_at(&self, idx: u32) {
+    fn free_at(&self, idx: u32) {
         debug_assert!(
             unsafe { &*self.tree.get() }.is_set(idx),
             "free_at: slot {} n'était pas alloué",
@@ -236,7 +236,7 @@ impl<const N: usize> AutoGuard<'_, N> {
 impl<const N: usize> Drop for AutoGuard<'_, N> {
     #[inline]
     fn drop(&mut self) {
-        unsafe { self.slab.free_at(self.idx); }
+        self.slab.free_at(self.idx); 
     }
 }
 

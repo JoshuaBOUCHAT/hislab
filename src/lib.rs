@@ -20,8 +20,6 @@
 use std::ops::{Index, IndexMut};
 
 use memmap2::MmapMut;
-use libc;
-
 use crate::bit_block::BitBlock;
 use crate::bitmap_tree::BitmapTree;
 

@@ -553,7 +553,7 @@ fn test_retain_tagged() {
 fn test_retain_tagged_ttl_simulation() {
     #[derive(Default)]
     struct Entity {
-        value: i32,
+        _value: i32,
         ttl: u32,
     }
 
@@ -561,7 +561,7 @@ fn test_retain_tagged_ttl_simulation() {
 
     for i in 0..10 {
         slab.insert_tagged(Entity {
-            value: i,
+            _value: i,
             ttl: i as u32,
         });
     }
