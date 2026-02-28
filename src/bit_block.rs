@@ -204,4 +204,12 @@ impl BitBlock {
         }
         was_full
     }
+    #[inline(always)]
+    pub fn is_set(&self,bit_idx:usize)->bool{
+        debug_assert!(bit_idx < 512);
+        let word_idx = bit_idx >> 6;
+        let word = self.data[word_idx];
+        let mask =1<<(bit_idx&63);
+        word&mask!=0
+    }
 }
