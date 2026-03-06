@@ -165,9 +165,27 @@ impl<const N: usize> BufferSlab<N> {
         Some(AutoGuard { ptr, idx, slab: self })
     }
 
-    /// Libère un slot par index. Appelé par `Drop` de [`AutoGuard`].
+    /// Alloue un slot et retourne `(ptr, idx)` bruts sans créer de guard.
+    ///
+    /// L'appelant est responsable d'appeler [`free_at`](Self::free_at) à la destruction.
+    /// Utilisé par [`crate::monoio_buffer::MonoBuffer`] qui possède un `Rc` plutôt
+    /// qu'une référence, empêchant l'utilisation directe de `try_allocate`.
+    #[cfg(feature = "monoio")]
     #[inline]
-    fn free_at(&self, idx: u32) {
+    pub(crate) fn alloc_raw(&self) -> Option<(*mut u8, u32)> {
+        let tree = unsafe { &mut *self.tree.get() };
+        let idx = tree.find_free_idx();
+        if idx >= self.virtual_capacity {
+            return None;
+        }
+        tree.set_bit(idx);
+        let ptr = unsafe { self.storage.add(idx as usize * N) };
+        Some((ptr, idx))
+    }
+
+    /// Libère un slot par index. Appelé par `Drop` de [`AutoGuard`] et [`crate::monoio_buffer::MonoBuffer`].
+    #[inline]
+    pub(crate) fn free_at(&self, idx: u32) {
         debug_assert!(
             unsafe { &*self.tree.get() }.is_set(idx),
             "free_at: slot {} n'était pas alloué",

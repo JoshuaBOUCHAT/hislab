@@ -26,6 +26,8 @@ use crate::bitmap_tree::BitmapTree;
 mod bit_block;
 mod bitmap_tree;
 pub mod buffer_slab;
+#[cfg(feature = "monoio")]
+pub mod monoio_buffer;
 #[cfg(test)]
 mod test;
 
