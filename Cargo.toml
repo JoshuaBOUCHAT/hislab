@@ -16,10 +16,12 @@ categories = ["data-structures", "memory-management", "no-std"]
 libc = "0.2"
 memmap2 = "0.9.10"
 rand = { version = "0.8", optional = true }
+monoio = { version = "0.2", optional = true }
 
 [features]
 default = []
 rand = ["dep:rand"]
+monoio = ["dep:monoio"]
 
 [profile.release]
 lto = true
