@@ -7,7 +7,7 @@
 //! ```
 //! use hislab::HiSlab;
 //!
-//! let mut slab = HiSlab::<i32>::new(0, 65536).unwrap();
+//! let slab = HiSlab::<i32>::new(0, 65536).unwrap();
 //!
 //! let idx = slab.insert(42);
 //! assert_eq!(slab[idx], 42);
@@ -17,6 +17,7 @@
 //! assert!(slab.get(idx).is_none());
 //! ```
 
+use std::cell::UnsafeCell;
 use std::ops::{Index, IndexMut};
 
 use memmap2::MmapMut;
@@ -39,11 +40,17 @@ mod test;
 /// a 4-level bitmap hierarchy. This allows finding a free slot in constant time
 /// regardless of fragmentation.
 ///
+/// `!Send + !Sync` par construction (raw ptr) — wrapping dans un `Mutex` si
+/// nécessaire. En contrepartie, `insert` et `remove` prennent `&self` (interior
+/// mutability via `UnsafeCell`, sound car `!Sync` interdit tout accès concurrent).
+///
 /// For tagging support, see [`TaggedHiSlab`].
 pub struct HiSlab<T: 'static> {
     data: *mut T,
     virtual_capacity: u32,
-    pub(crate) tree: BitmapTree,
+    /// Bitmap hiérarchique. Mutable via &self grâce à UnsafeCell.
+    /// Sound car !Sync interdit tout accès concurrent.
+    pub(crate) tree: UnsafeCell<BitmapTree>,
     mmap: MmapMut,
 }
 
@@ -89,7 +96,7 @@ impl<T> HiSlab<T> {
         Ok(Self {
             data: ptr,
             virtual_capacity,
-            tree: BitmapTree::new(),
+            tree: UnsafeCell::new(BitmapTree::new()),
             mmap,
         })
     }
@@ -101,8 +108,9 @@ impl<T> HiSlab<T> {
     /// The returned index is stable and can be used to access the value
     /// until it is removed.
     #[inline(always)]
-    pub fn insert(&mut self, val: T) -> u32 {
-        let idx = self.tree.reserve_free_idx();
+    pub fn insert(&self, val: T) -> u32 {
+        // SAFETY: !Sync guarantees single-threaded access; UnsafeCell provides interior mutability.
+        let idx = unsafe { &mut *self.tree.get() }.reserve_free_idx();
         assert!(idx < self.virtual_capacity, "HiSlab: virtual_capacity épuisée");
         unsafe { std::ptr::write(self.data.add(idx as usize), val) };
         idx
@@ -111,20 +119,19 @@ impl<T> HiSlab<T> {
     /// Removes the element at the given index and returns it, or `None` if the slot is empty.
     ///
     /// The slot becomes available for future insertions.
-    pub fn remove(&mut self, idx: u32) -> Option<T> {
+    pub fn remove(&self, idx: u32) -> Option<T> {
         if !self.is_occupied(idx) {
             return None;
         }
-
-        self.tree.clear_bit(idx);
-
+        // SAFETY: !Sync guarantees single-threaded access.
+        unsafe { &mut *self.tree.get() }.clear_bit(idx);
         Some(unsafe { std::ptr::read(self.data.add(idx as usize)) })
     }
 
     /// Returns `true` if the slot at the given index is occupied.
     #[inline(always)]
     pub fn is_occupied(&self, idx: u32) -> bool {
-        self.tree.is_set(idx)
+        unsafe { &*self.tree.get() }.is_set(idx)
     }
 
     /// Returns a reference to the element at the given index, or `None` if empty.
@@ -190,7 +197,7 @@ impl<T> HiSlab<T> {
     where
         F: FnMut(u32, &T),
     {
-        for (b_idx, block) in self.tree.lvl1.iter().enumerate() {
+        for (b_idx, block) in unsafe { &*self.tree.get() }.lvl1.iter().enumerate() {
             for (w_idx, &word) in block.data.iter().enumerate() {
                 if word == 0 {
                     continue;
@@ -224,10 +231,13 @@ pub struct SlabIter<'a, T> {
 
 impl<'a, T> SlabIter<'a, T> {
     fn new(slab: &'a HiSlab<T>) -> Self {
-        let first_word = slab.tree.lvl1.first().map(|b| b.data[0]).unwrap_or(0);
+        // SAFETY: HiSlab is !Sync; single-threaded access guaranteed.
+        // The BitmapTree lives at least 'a since slab: &'a HiSlab<T>.
+        let tree: &'a BitmapTree = unsafe { &*slab.tree.get() };
+        let first_word = tree.lvl1.first().map(|b| b.data[0]).unwrap_or(0);
         Self {
             slab: slab.data,
-            lvl1: &slab.tree.lvl1,
+            lvl1: &tree.lvl1,
             block_idx: 0,
             word_idx: 0,
             current_word: first_word,
@@ -284,10 +294,12 @@ pub struct SlabIterMut<'a, T> {
 
 impl<'a, T> SlabIterMut<'a, T> {
     fn new(slab: &'a mut HiSlab<T>) -> Self {
-        let first_word = slab.tree.lvl1.first().map(|b| b.data[0]).unwrap_or(0);
+        // SAFETY: we hold &'a mut HiSlab<T>, exclusive access guaranteed.
+        let tree: &'a BitmapTree = unsafe { &*slab.tree.get() };
+        let first_word = tree.lvl1.first().map(|b| b.data[0]).unwrap_or(0);
         Self {
             data_ptr: slab.data,
-            lvl1: &slab.tree.lvl1,
+            lvl1: &tree.lvl1,
             block_idx: 0,
             word_idx: 0,
             current_word: first_word,
@@ -376,9 +388,10 @@ impl<T> IntoIterator for HiSlab<T> {
 
     fn into_iter(mut self) -> Self::IntoIter {
         let data = self.data;
-        let lvl1 = std::mem::take(&mut self.tree.lvl1);
-        let _lvl2 = std::mem::take(&mut self.tree.lvl2);
-        let _lvl3 = std::mem::take(&mut self.tree.lvl3);
+        let tree = self.tree.get_mut();
+        let lvl1 = std::mem::take(&mut tree.lvl1);
+        let _lvl2 = std::mem::take(&mut tree.lvl2);
+        let _lvl3 = std::mem::take(&mut tree.lvl3);
         let first_word = lvl1.first().map(|b| b.data[0]).unwrap_or(0);
         // Safety: ptr::read + forget is the standard pattern for moving out of a
         // Drop type field-by-field.
@@ -404,7 +417,7 @@ impl<T> Drop for SlabIntoIter<T> {
 
 impl<T> Drop for HiSlab<T> {
     fn drop(&mut self) {
-        for (b_idx, block) in self.tree.lvl1.iter().enumerate() {
+        for (b_idx, block) in self.tree.get_mut().lvl1.iter().enumerate() {
             for (w_idx, &word) in block.data.iter().enumerate() {
                 if word == 0 {
                     continue;
@@ -472,12 +485,17 @@ mod random {
         /// Compte le nombre total d'éléments occupés
         #[inline]
         pub fn count_occupied(&self) -> usize {
-            self.tree.lvl1.iter().map(|b| b.popcnt() as usize).sum()
+            unsafe { &*self.tree.get() }
+                .lvl1
+                .iter()
+                .map(|b| b.popcnt() as usize)
+                .sum()
         }
 
         /// Sélectionne un élément occupé aléatoirement.
         pub fn random_occupied<R: Rng>(&self, rng: &mut R) -> Option<(u32, &T)> {
-            let block_counts: Vec<u32> = self.tree.lvl1.iter().map(|b| b.popcnt()).collect();
+            let tree = unsafe { &*self.tree.get() };
+            let block_counts: Vec<u32> = tree.lvl1.iter().map(|b| b.popcnt()).collect();
             let total: u32 = block_counts.iter().sum();
 
             if total == 0 {
@@ -495,7 +513,7 @@ mod random {
                 choice -= cnt;
             }
 
-            let block = &self.tree.lvl1[block_idx];
+            let block = &tree.lvl1[block_idx];
             let mut word_choice = choice;
 
             let mut word_idx = 0;
@@ -518,7 +536,8 @@ mod random {
 
         /// Sélectionne un élément occupé aléatoirement (version mutable).
         pub fn random_occupied_mut<R: Rng>(&mut self, rng: &mut R) -> Option<(u32, &mut T)> {
-            let block_counts: Vec<u32> = self.tree.lvl1.iter().map(|b| b.popcnt()).collect();
+            let tree = unsafe { &*self.tree.get() };
+            let block_counts: Vec<u32> = tree.lvl1.iter().map(|b| b.popcnt()).collect();
             let total: u32 = block_counts.iter().sum();
 
             if total == 0 {
@@ -536,7 +555,7 @@ mod random {
                 choice -= cnt;
             }
 
-            let block = &self.tree.lvl1[block_idx];
+            let block = &tree.lvl1[block_idx];
             let mut word_choice = choice;
 
             let mut word_idx = 0;
@@ -582,7 +601,11 @@ mod random {
             let mut selected_indices = HashSet::with_capacity(count);
             let mut results = Vec::with_capacity(count);
 
-            let block_counts: Vec<u32> = self.tree.lvl1.iter().map(|b| b.popcnt()).collect();
+            let block_counts: Vec<u32> = unsafe { &*self.tree.get() }
+                .lvl1
+                .iter()
+                .map(|b| b.popcnt())
+                .collect();
             let total_u32 = total as u32;
 
             while results.len() < count {
@@ -602,6 +625,7 @@ mod random {
 
         #[inline]
         fn choice_to_index(&self, block_counts: &[u32], mut choice: u32) -> u32 {
+            let tree = unsafe { &*self.tree.get() };
             let mut block_idx = 0;
             for (i, &cnt) in block_counts.iter().enumerate() {
                 if choice < cnt {
@@ -611,7 +635,7 @@ mod random {
                 choice -= cnt;
             }
 
-            let block = &self.tree.lvl1[block_idx];
+            let block = &tree.lvl1[block_idx];
             let mut word_idx = 0;
             for (i, &word) in block.data.iter().enumerate() {
                 let pop = word.count_ones();
@@ -643,7 +667,7 @@ mod random {
 /// All base slab operations are delegated to the inner [`HiSlab`].
 pub struct TaggedHiSlab<T: 'static> {
     inner: HiSlab<T>,
-    tagged_tree: BitmapTree,
+    tagged_tree: UnsafeCell<BitmapTree>,
 }
 
 impl<T> TaggedHiSlab<T> {
@@ -653,7 +677,7 @@ impl<T> TaggedHiSlab<T> {
     pub fn new(initial_capacity: u32, virtual_capacity: u32) -> Result<Self, std::io::Error> {
         Ok(Self {
             inner: HiSlab::new(initial_capacity, virtual_capacity)?,
-            tagged_tree: BitmapTree::new(),
+            tagged_tree: UnsafeCell::new(BitmapTree::new()),
         })
     }
 }
@@ -661,20 +685,20 @@ impl<T> TaggedHiSlab<T> {
 impl<T: 'static> TaggedHiSlab<T> {
     /// Inserts a value and returns its index. The element is not tagged.
     #[inline(always)]
-    pub fn insert(&mut self, val: T) -> u32 {
+    pub fn insert(&self, val: T) -> u32 {
         let idx = self.inner.insert(val);
         // Sécurité : effacer le tag si le slot réutilisé était taggé
-        self.tagged_tree.clear_bit(idx);
+        unsafe { &mut *self.tagged_tree.get() }.clear_bit(idx);
         idx
     }
 
     /// Removes the element at the given index and returns it, or `None` if the slot is empty.
     ///
     /// Also clears the tagged flag if set.
-    pub fn remove(&mut self, idx: u32) -> Option<T> {
+    pub fn remove(&self, idx: u32) -> Option<T> {
         let result = self.inner.remove(idx);
         if result.is_some() {
-            self.tagged_tree.clear_bit(idx);
+            unsafe { &mut *self.tagged_tree.get() }.clear_bit(idx);
         }
         result
     }
@@ -777,9 +801,9 @@ impl<T: 'static> IntoIterator for TaggedHiSlab<T> {
 impl<T: 'static> TaggedHiSlab<T> {
     /// Inserts a value with the tagged flag set and returns its index.
     #[inline(always)]
-    pub fn insert_tagged(&mut self, val: T) -> u32 {
+    pub fn insert_tagged(&self, val: T) -> u32 {
         let idx = self.inner.insert(val);
-        self.tagged_tree.set_bit(idx);
+        unsafe { &mut *self.tagged_tree.get() }.set_bit(idx);
         idx
     }
 
@@ -788,14 +812,15 @@ impl<T: 'static> TaggedHiSlab<T> {
     /// Returns `true` if the element was successfully tagged (it exists and wasn't already tagged).
     /// Returns `false` if the slot is empty or already tagged.
     #[inline]
-    pub fn tag(&mut self, idx: u32) -> bool {
+    pub fn tag(&self, idx: u32) -> bool {
         if !self.inner.is_occupied(idx) {
             return false;
         }
-        if self.tagged_tree.is_set(idx) {
+        let tagged = unsafe { &mut *self.tagged_tree.get() };
+        if tagged.is_set(idx) {
             return false;
         }
-        self.tagged_tree.set_bit(idx);
+        tagged.set_bit(idx);
         true
     }
 
@@ -804,21 +829,22 @@ impl<T: 'static> TaggedHiSlab<T> {
     /// Returns `true` if the element was successfully untagged.
     /// Returns `false` if the slot is empty or wasn't tagged.
     #[inline]
-    pub fn untag(&mut self, idx: u32) -> bool {
+    pub fn untag(&self, idx: u32) -> bool {
         if !self.inner.is_occupied(idx) {
             return false;
         }
-        if !self.tagged_tree.is_set(idx) {
+        let tagged = unsafe { &mut *self.tagged_tree.get() };
+        if !tagged.is_set(idx) {
             return false;
         }
-        self.tagged_tree.clear_bit(idx);
+        tagged.clear_bit(idx);
         true
     }
 
     /// Returns `true` if the slot at the given index is tagged.
     #[inline(always)]
     pub fn is_tagged(&self, idx: u32) -> bool {
-        self.tagged_tree.is_set(idx)
+        unsafe { &*self.tagged_tree.get() }.is_set(idx)
     }
 
     /// Iterates over all tagged elements with maximum performance.
@@ -826,7 +852,7 @@ impl<T: 'static> TaggedHiSlab<T> {
     where
         F: FnMut(u32, &T),
     {
-        self.tagged_tree.for_each_set(|idx| unsafe {
+        unsafe { &*self.tagged_tree.get() }.for_each_set(|idx| unsafe {
             f(idx, self.inner.get_unchecked(idx));
         });
     }
@@ -861,7 +887,7 @@ impl<T: 'static> TaggedHiSlab<T> {
     {
         let mut to_remove = Vec::new();
 
-        for (b_idx, block) in self.tagged_tree.lvl1.iter().enumerate() {
+        for (b_idx, block) in self.tagged_tree.get_mut().lvl1.iter().enumerate() {
             for (w_idx, &word) in block.data.iter().enumerate() {
                 if word == 0 {
                     continue;
@@ -898,7 +924,7 @@ impl<T: 'static> TaggedHiSlab<T> {
     {
         let mut to_untag = Vec::new();
 
-        for (b_idx, block) in self.tagged_tree.lvl1.iter().enumerate() {
+        for (b_idx, block) in self.tagged_tree.get_mut().lvl1.iter().enumerate() {
             for (w_idx, &word) in block.data.iter().enumerate() {
                 if word == 0 {
                     continue;
@@ -922,7 +948,7 @@ impl<T: 'static> TaggedHiSlab<T> {
         }
 
         for idx in to_untag {
-            self.tagged_tree.clear_bit(idx);
+            unsafe { &mut *self.tagged_tree.get() }.clear_bit(idx);
         }
     }
 
@@ -930,7 +956,7 @@ impl<T: 'static> TaggedHiSlab<T> {
     #[cfg(feature = "rand")]
     #[inline]
     pub fn count_tagged(&self) -> usize {
-        self.tagged_tree.count_set()
+        unsafe { &*self.tagged_tree.get() }.count_set()
     }
 }
 
@@ -948,15 +974,13 @@ pub struct TaggedIter<'a, T> {
 
 impl<'a, T> TaggedIter<'a, T> {
     fn new(slab: &'a TaggedHiSlab<T>) -> Self {
-        let first_word = slab
-            .tagged_tree
-            .lvl1
-            .first()
-            .map(|b| b.data[0])
-            .unwrap_or(0);
+        // SAFETY: TaggedHiSlab is !Sync; single-threaded access guaranteed.
+        // The BitmapTree lives at least 'a since slab: &'a TaggedHiSlab<T>.
+        let tree: &'a BitmapTree = unsafe { &*slab.tagged_tree.get() };
+        let first_word = tree.lvl1.first().map(|b| b.data[0]).unwrap_or(0);
         Self {
             data: slab.inner.data,
-            lvl1: &slab.tagged_tree.lvl1,
+            lvl1: &tree.lvl1,
             block_idx: 0,
             word_idx: 0,
             current_word: first_word,
@@ -1007,15 +1031,12 @@ pub struct TaggedIterMut<'a, T> {
 
 impl<'a, T> TaggedIterMut<'a, T> {
     fn new(slab: &'a mut TaggedHiSlab<T>) -> Self {
-        let first_word = slab
-            .tagged_tree
-            .lvl1
-            .first()
-            .map(|b| b.data[0])
-            .unwrap_or(0);
+        // SAFETY: we hold &'a mut TaggedHiSlab<T>, exclusive access guaranteed.
+        let tree: &'a BitmapTree = unsafe { &*slab.tagged_tree.get() };
+        let first_word = tree.lvl1.first().map(|b| b.data[0]).unwrap_or(0);
         Self {
             data_ptr: slab.inner.data,
-            lvl1: &slab.tagged_tree.lvl1,
+            lvl1: &tree.lvl1,
             block_idx: 0,
             word_idx: 0,
             current_word: first_word,
@@ -1091,14 +1112,14 @@ impl<T> TaggedHiSlab<T> {
     /// Selects a random tagged element.
     /// Returns None if no elements are tagged.
     pub fn random_tagged<R: rand::Rng>(&self, rng: &mut R) -> Option<(u32, &T)> {
-        let idx = self.tagged_tree.random_set(rng)?;
+        let idx = unsafe { &*self.tagged_tree.get() }.random_set(rng)?;
         unsafe { Some((idx, self.inner.get_unchecked(idx))) }
     }
 
     /// Selects a random tagged element (mutable version).
     /// Returns None if no elements are tagged.
     pub fn random_tagged_mut<R: rand::Rng>(&mut self, rng: &mut R) -> Option<(u32, &mut T)> {
-        let idx = self.tagged_tree.random_set(rng)?;
+        let idx = unsafe { &*self.tagged_tree.get() }.random_set(rng)?;
         unsafe { Some((idx, self.inner.get_unchecked_mut(idx))) }
     }
 
@@ -1123,7 +1144,7 @@ impl<T> TaggedHiSlab<T> {
         if count >= total {
             let mut results = Vec::with_capacity(total);
             let mut indices = Vec::with_capacity(total);
-            self.tagged_tree.for_each_set(|idx| {
+            unsafe { &*self.tagged_tree.get() }.for_each_set(|idx| {
                 indices.push(idx);
             });
             for idx in indices {
@@ -1138,7 +1159,7 @@ impl<T> TaggedHiSlab<T> {
         let mut results = Vec::with_capacity(count);
 
         while results.len() < count {
-            if let Some(idx) = self.tagged_tree.random_set(rng) {
+            if let Some(idx) = unsafe { &*self.tagged_tree.get() }.random_set(rng) {
                 if selected.insert(idx) {
                     unsafe {
                         results.push((idx, self.inner.get_unchecked(idx)));
