@@ -9,7 +9,7 @@ repository = "https://github.com/JoshuaBOUCHAT/hislab"
 documentation = "https://docs.rs/hislab"
 readme = "README.md"
 keywords = ["slab", "allocator", "bitmap", "simd", "data-structure"]
-categories = ["data-structures", "memory-management", "no-std"]
+categories = ["data-structures", "memory-management"]
 
 
 [dependencies]

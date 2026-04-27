@@ -20,9 +20,9 @@
 use std::cell::UnsafeCell;
 use std::ops::{Index, IndexMut};
 
-use memmap2::MmapMut;
 use crate::bit_block::BitBlock;
 use crate::bitmap_tree::BitmapTree;
+use memmap2::MmapMut;
 
 mod bit_block;
 mod bitmap_tree;
@@ -111,7 +111,10 @@ impl<T> HiSlab<T> {
     pub fn insert(&self, val: T) -> u32 {
         // SAFETY: !Sync guarantees single-threaded access; UnsafeCell provides interior mutability.
         let idx = unsafe { &mut *self.tree.get() }.reserve_free_idx();
-        assert!(idx < self.virtual_capacity, "HiSlab: virtual_capacity épuisée");
+        assert!(
+            idx < self.virtual_capacity,
+            "HiSlab: virtual_capacity épuisée"
+        );
         unsafe { std::ptr::write(self.data.add(idx as usize), val) };
         idx
     }

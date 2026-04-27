@@ -41,14 +41,20 @@ impl BitBlock {
     #[target_feature(enable = "avx512f")]
     unsafe fn is_full_x86_512(&self) -> bool {
         use std::arch::x86_64::*;
-        let data = _mm512_load_si512(self.data.as_ptr() as *const __m512i);
-        let full = _mm512_set1_epi64(-1);
-        let mask = _mm512_cmpeq_epu64_mask(data, full);
-        mask == 0xFF
+        unsafe {
+            let data = _mm512_load_si512(self.data.as_ptr() as *const __m512i);
+            let full = _mm512_set1_epi64(-1);
+            let mask = _mm512_cmpeq_epu64_mask(data, full);
+            mask == 0xFF
+        }
     }
 
     // --- x86_64 AVX2 ---
-    #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+    #[cfg(all(
+        target_arch = "x86_64",
+        target_feature = "avx2",
+        not(target_feature = "avx512f")
+    ))]
     #[target_feature(enable = "avx2")]
     unsafe fn is_full_x86_256(&self) -> bool {
         use std::arch::x86_64::*;
@@ -139,7 +145,11 @@ impl BitBlock {
     }
 
     // --- x86_64 AVX2 ---
-    #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+    #[cfg(all(
+        target_arch = "x86_64",
+        target_feature = "avx2",
+        not(target_feature = "avx512f")
+    ))]
     unsafe fn find_x86_256(&self) -> Option<usize> {
         use std::arch::x86_64::*;
         let ptr = self.data.as_ptr() as *const __m256i;
