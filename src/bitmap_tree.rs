@@ -130,9 +130,13 @@ impl BitmapTree {
         let l2_block_idx = l1_block_idx / 512;
         let l2_bit_idx = l1_block_idx % 512;
 
+        self.ensure_lvl2(l2_block_idx);
+
         if self.lvl2[l2_block_idx].set_bit_and_check_full(l2_bit_idx) {
             let l3_block_idx = l2_block_idx / 512;
             let l3_bit_idx = l2_block_idx % 512;
+
+            self.ensure_lvl3(l3_block_idx);
 
             if self.lvl3[l3_block_idx].set_bit_and_check_full(l3_bit_idx) {
                 self.lvl4 |= 1 << l3_block_idx;
@@ -144,9 +148,17 @@ impl BitmapTree {
         let l2_block_idx = l1_block_idx / 512;
         let l2_bit_idx = l1_block_idx % 512;
 
+        if l2_block_idx >= self.lvl2.len() {
+            return;
+        }
+
         if self.lvl2[l2_block_idx].clear_bit_and_was_full(l2_bit_idx) {
             let l3_block_idx = l2_block_idx / 512;
             let l3_bit_idx = l2_block_idx % 512;
+
+            if l3_block_idx >= self.lvl3.len() {
+                return;
+            }
 
             if self.lvl3[l3_block_idx].clear_bit_and_was_full(l3_bit_idx) {
                 self.lvl4 &= !(1 << l3_block_idx);
