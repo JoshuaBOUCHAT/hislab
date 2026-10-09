@@ -608,3 +608,19 @@ fn test_retain_tag_only() {
         }
     }
 }
+
+#[test]
+fn copy_occupancy_matches_is_occupied() {
+    let slab: HiSlab<u64> = HiSlab::new(0, 1 << 20).unwrap();
+    let idx: Vec<u32> = (0..3000).map(|i| slab.insert(i)).collect();
+    for &i in idx.iter().step_by(3) {
+        slab.remove(i);
+    }
+    let mut out = Vec::new();
+    let n = slab.copy_occupancy(&mut out);
+    assert_eq!(n as usize, out.len() * 64);
+    for i in 0..n {
+        let bit = out[(i / 64) as usize] >> (i % 64) & 1 == 1;
+        assert_eq!(bit, slab.is_occupied(i), "slot {i}");
+    }
+}

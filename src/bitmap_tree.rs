@@ -93,6 +93,11 @@ impl BitmapTree {
     pub fn ensure_lvl1(&mut self, idx: usize) {
         if idx >= self.lvl1.len() {
             self.lvl1.resize_with(idx + 1, BitBlock::default);
+            // Grow parent levels eagerly so propagate_full/propagate_empty
+            // can use direct indexing without bounds checks.
+            let l2_idx = idx / 512;
+            self.ensure_lvl2(l2_idx);
+            self.ensure_lvl3(l2_idx / 512);
         }
     }
 
@@ -130,13 +135,10 @@ impl BitmapTree {
         let l2_block_idx = l1_block_idx / 512;
         let l2_bit_idx = l1_block_idx % 512;
 
-        self.ensure_lvl2(l2_block_idx);
-
+        // lvl2/lvl3 are guaranteed sized: ensure_lvl1 grows them eagerly.
         if self.lvl2[l2_block_idx].set_bit_and_check_full(l2_bit_idx) {
             let l3_block_idx = l2_block_idx / 512;
             let l3_bit_idx = l2_block_idx % 512;
-
-            self.ensure_lvl3(l3_block_idx);
 
             if self.lvl3[l3_block_idx].set_bit_and_check_full(l3_bit_idx) {
                 self.lvl4 |= 1 << l3_block_idx;
@@ -148,17 +150,11 @@ impl BitmapTree {
         let l2_block_idx = l1_block_idx / 512;
         let l2_bit_idx = l1_block_idx % 512;
 
-        if l2_block_idx >= self.lvl2.len() {
-            return;
-        }
-
+        // lvl2/lvl3 are guaranteed sized: the block was full, so it was
+        // previously set via set_bit which called ensure_lvl1 (eager growth).
         if self.lvl2[l2_block_idx].clear_bit_and_was_full(l2_bit_idx) {
             let l3_block_idx = l2_block_idx / 512;
             let l3_bit_idx = l2_block_idx % 512;
-
-            if l3_block_idx >= self.lvl3.len() {
-                return;
-            }
 
             if self.lvl3[l3_block_idx].clear_bit_and_was_full(l3_bit_idx) {
                 self.lvl4 &= !(1 << l3_block_idx);

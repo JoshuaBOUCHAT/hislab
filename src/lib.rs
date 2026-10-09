@@ -192,6 +192,22 @@ impl<T> HiSlab<T> {
 }
 
 impl<T> HiSlab<T> {
+    /// Copie le bitmap d'occupation de niveau 1 dans `out` (réutilisé) :
+    /// slot `i` occupé ⇔ bit `i % 64` du mot `i / 64`. Un seul memcpy.
+    /// Sert de snapshot de présence au début d'une save progressive.
+    /// Retourne le nombre de slots couverts (`out.len() * 64`).
+    pub fn copy_occupancy(&self, out: &mut Vec<u64>) -> u32 {
+        let lvl1 = &unsafe { &*self.tree.get() }.lvl1;
+        // SAFETY: BitBlock = [u64; 8] en repr(align(64)), taille 64 :
+        // un Vec<BitBlock> est une suite contiguë de u64.
+        let words = unsafe {
+            std::slice::from_raw_parts(lvl1.as_ptr() as *const u64, lvl1.len() * 8)
+        };
+        out.clear();
+        out.extend_from_slice(words);
+        (words.len() * 64) as u32
+    }
+
     /// Iterates over all occupied slots with maximum performance.
     ///
     /// This is faster than using the iterator for simple operations
@@ -738,6 +754,11 @@ impl<T: 'static> TaggedHiSlab<T> {
     #[inline(always)]
     pub unsafe fn get_unchecked_mut(&mut self, idx: u32) -> &mut T {
         unsafe { self.inner.get_unchecked_mut(idx) }
+    }
+
+    /// Voir [`HiSlab::copy_occupancy`].
+    pub fn copy_occupancy(&self, out: &mut Vec<u64>) -> u32 {
+        self.inner.copy_occupancy(out)
     }
 
     /// Iterates over all occupied slots with maximum performance.
