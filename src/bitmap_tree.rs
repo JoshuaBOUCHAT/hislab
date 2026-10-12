@@ -28,12 +28,12 @@ impl BitmapTree {
     /// Vérifie si un bit est occupé
     #[inline(always)]
     pub fn is_set(&self, idx: u32) -> bool {
-        let idx=idx as usize;
+        let idx = idx as usize;
         let b_idx = idx >> 9; // / 512
         if b_idx >= self.lvl1.len() {
             return false;
         }
-        self.lvl1[b_idx].is_set(idx&0x1FF)
+        self.lvl1[b_idx].is_set(idx & 0x1FF)
     }
 
     /// Trouve le premier slot libre dans toute la hiérarchie, croît si nécessaire,

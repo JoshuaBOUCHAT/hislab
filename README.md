@@ -63,6 +63,7 @@ Both are `u32`. `initial_capacity` must be `<= virtual_capacity`.
 | `get(idx) -> Option<&T>` | Borrow the value at index |
 | `get_mut(idx) -> Option<&mut T>` | Mutably borrow the value at index |
 | `is_occupied(idx) -> bool` | Check if a slot is occupied |
+| `copy_occupancy(&mut Vec<u64>) -> u32` | Copy the occupancy bitmap (1 bit per slot) in one memcpy — a cheap point-in-time presence snapshot. Also on `TaggedHiSlab` |
 | `slab[idx]` | Panics if the slot is empty |
 
 ### Iteration

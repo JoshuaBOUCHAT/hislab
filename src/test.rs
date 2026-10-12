@@ -80,7 +80,7 @@ fn test_stress_lifecycle() {
         let new_val = 999_999;
         let idx = slab.insert(new_val);
         assert!(
-            idx % 2 == 0,
+            idx.is_multiple_of(2),
             "L'insertion devrait combler les trous (index pair), reçu {}",
             idx
         );
@@ -93,7 +93,7 @@ fn test_stress_lifecycle() {
     let _ = slab[valid_idx];
 
     unsafe {
-        assert_eq!(*slab.get_unchecked(valid_idx), 1 * 10);
+        assert_eq!(*slab.get_unchecked(valid_idx), 10);
     }
 
     println!(

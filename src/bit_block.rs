@@ -78,10 +78,10 @@ impl BitBlock {
 
         // NEON travaille sur 128 bits (2 x u64), on fait donc 4 loads
         // pour couvrir les 8 x u64 du BitBlock
-        let v1 = vld1q_u64(ptr);           // data[0..2]
-        let v2 = vld1q_u64(ptr.add(2));    // data[2..4]
-        let v3 = vld1q_u64(ptr.add(4));    // data[4..6]
-        let v4 = vld1q_u64(ptr.add(6));    // data[6..8]
+        let v1 = vld1q_u64(ptr); // data[0..2]
+        let v2 = vld1q_u64(ptr.add(2)); // data[2..4]
+        let v3 = vld1q_u64(ptr.add(4)); // data[4..6]
+        let v4 = vld1q_u64(ptr.add(6)); // data[6..8]
 
         let res = vandq_u64(vandq_u64(v1, v2), vandq_u64(v3, v4));
         // vgetq_lane_u64 extrait un u64 du registre NEON
@@ -215,11 +215,11 @@ impl BitBlock {
         was_full
     }
     #[inline(always)]
-    pub fn is_set(&self,bit_idx:usize)->bool{
+    pub fn is_set(&self, bit_idx: usize) -> bool {
         debug_assert!(bit_idx < 512);
         let word_idx = bit_idx >> 6;
         let word = self.data[word_idx];
-        let mask =1<<(bit_idx&63);
-        word&mask!=0
+        let mask = 1 << (bit_idx & 63);
+        word & mask != 0
     }
 }

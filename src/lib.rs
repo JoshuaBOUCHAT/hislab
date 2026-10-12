@@ -36,20 +36,21 @@ mod test;
 
 /// A slab allocator with O(1) insert and remove using hierarchical bitmaps.
 ///
-/// `HiSlab` stores elements in a contiguous `Vec` and tracks free slots using
-/// a 4-level bitmap hierarchy. This allows finding a free slot in constant time
+/// `HiSlab` stores elements in one contiguous region reserved up front with an
+/// anonymous `mmap` (indices are stable, nothing is ever moved), and tracks free
+/// slots with a 4-level bitmap hierarchy, so a free slot is found in constant time
 /// regardless of fragmentation.
 ///
-/// `!Send + !Sync` par construction (raw ptr) — wrapping dans un `Mutex` si
-/// nécessaire. En contrepartie, `insert` et `remove` prennent `&self` (interior
-/// mutability via `UnsafeCell`, sound car `!Sync` interdit tout accès concurrent).
+/// `!Send + !Sync` by construction (raw pointer): wrap it in a `Mutex` if needed.
+/// In exchange, `insert` and `remove` take `&self` (interior mutability through
+/// `UnsafeCell`, sound because `!Sync` forbids any concurrent access).
 ///
 /// For tagging support, see [`TaggedHiSlab`].
 pub struct HiSlab<T: 'static> {
     data: *mut T,
     virtual_capacity: u32,
-    /// Bitmap hiérarchique. Mutable via &self grâce à UnsafeCell.
-    /// Sound car !Sync interdit tout accès concurrent.
+    /// Hierarchical bitmap, mutable through `&self` via `UnsafeCell`.
+    /// Sound because `!Sync` forbids any concurrent access.
     pub(crate) tree: UnsafeCell<BitmapTree>,
     mmap: MmapMut,
 }
@@ -57,22 +58,22 @@ pub struct HiSlab<T: 'static> {
 impl<T> HiSlab<T> {
     /// Creates a new empty `HiSlab`.
     ///
-    /// `virtual_capacity * size_of::<T>()` octets sont réservés immédiatement en espace
-    /// virtuel. Les pages couvrant `initial_capacity` slots sont pré-faultées via
-    /// `madvise(MADV_POPULATE_WRITE)`. Les pages au-delà sont committées à la demande.
+    /// `virtual_capacity * size_of::<T>()` bytes are reserved right away in virtual
+    /// memory. The pages covering `initial_capacity` slots are pre-faulted with
+    /// `madvise(MADV_POPULATE_WRITE)`; the following pages are committed on demand.
     ///
     /// # Panics
     ///
-    /// - Si `initial_capacity > virtual_capacity`
-    /// - Si `virtual_capacity * size_of::<T>()` dépasse `usize::MAX`
+    /// - If `initial_capacity > virtual_capacity`
+    /// - If `virtual_capacity * size_of::<T>()` overflows `usize`
     ///
     /// # Errors
     ///
-    /// Retourne une erreur si `mmap` échoue (OOM système).
+    /// Returns an error if `mmap` fails (system out of memory).
     pub fn new(initial_capacity: u32, virtual_capacity: u32) -> Result<Self, std::io::Error> {
         assert!(
             initial_capacity <= virtual_capacity,
-            "initial_capacity doit être <= virtual_capacity"
+            "initial_capacity must be <= virtual_capacity"
         );
 
         let virtual_bytes = (virtual_capacity as usize)
@@ -192,17 +193,16 @@ impl<T> HiSlab<T> {
 }
 
 impl<T> HiSlab<T> {
-    /// Copie le bitmap d'occupation de niveau 1 dans `out` (réutilisé) :
-    /// slot `i` occupé ⇔ bit `i % 64` du mot `i / 64`. Un seul memcpy.
-    /// Sert de snapshot de présence au début d'une save progressive.
-    /// Retourne le nombre de slots couverts (`out.len() * 64`).
+    /// Copies the level-1 occupancy bitmap into `out` (reused across calls):
+    /// slot `i` is occupied ⇔ bit `i % 64` of word `i / 64`. A single memcpy.
+    /// Useful as a point-in-time presence snapshot, e.g. at the start of an
+    /// incremental save. Returns the number of slots covered (`out.len() * 64`).
     pub fn copy_occupancy(&self, out: &mut Vec<u64>) -> u32 {
         let lvl1 = &unsafe { &*self.tree.get() }.lvl1;
         // SAFETY: BitBlock = [u64; 8] en repr(align(64)), taille 64 :
         // un Vec<BitBlock> est une suite contiguë de u64.
-        let words = unsafe {
-            std::slice::from_raw_parts(lvl1.as_ptr() as *const u64, lvl1.len() * 8)
-        };
+        let words =
+            unsafe { std::slice::from_raw_parts(lvl1.as_ptr() as *const u64, lvl1.len() * 8) };
         out.clear();
         out.extend_from_slice(words);
         (words.len() * 64) as u32
@@ -277,11 +277,7 @@ impl<'a, T: 'static> Iterator for SlabIter<'a, T> {
                 self.block_idx += 1;
             }
 
-            if let Some(block) = self.lvl1.get(self.block_idx) {
-                self.current_word = block.data[self.word_idx];
-            } else {
-                return None;
-            }
+            self.current_word = self.lvl1.get(self.block_idx)?.data[self.word_idx];
         }
 
         let bit = self.current_word.trailing_zeros();
@@ -340,11 +336,7 @@ impl<'a, T> Iterator for SlabIterMut<'a, T> {
                 self.block_idx += 1;
             }
 
-            if let Some(block) = self.lvl1.get(self.block_idx) {
-                self.current_word = block.data[self.word_idx];
-            } else {
-                return None;
-            }
+            self.current_word = self.lvl1.get(self.block_idx)?.data[self.word_idx];
         }
 
         let bit = self.current_word.trailing_zeros();
@@ -384,11 +376,7 @@ impl<T> Iterator for SlabIntoIter<T> {
                 self.block_idx += 1;
             }
 
-            if let Some(block) = self.lvl1.get(self.block_idx) {
-                self.current_word = block.data[self.word_idx];
-            } else {
-                return None;
-            }
+            self.current_word = self.lvl1.get(self.block_idx)?.data[self.word_idx];
         }
 
         let bit = self.current_word.trailing_zeros();
@@ -501,7 +489,7 @@ mod random {
     }
 
     impl<T> HiSlab<T> {
-        /// Compte le nombre total d'éléments occupés
+        /// Total number of occupied elements.
         #[inline]
         pub fn count_occupied(&self) -> usize {
             unsafe { &*self.tree.get() }
@@ -511,7 +499,7 @@ mod random {
                 .sum()
         }
 
-        /// Sélectionne un élément occupé aléatoirement.
+        /// Picks a random occupied element.
         pub fn random_occupied<R: Rng>(&self, rng: &mut R) -> Option<(u32, &T)> {
             let tree = unsafe { &*self.tree.get() };
             let block_counts: Vec<u32> = tree.lvl1.iter().map(|b| b.popcnt()).collect();
@@ -553,7 +541,7 @@ mod random {
             unsafe { Some((final_idx, &*self.data.add(final_idx as usize))) }
         }
 
-        /// Sélectionne un élément occupé aléatoirement (version mutable).
+        /// Picks a random occupied element (mutable).
         pub fn random_occupied_mut<R: Rng>(&mut self, rng: &mut R) -> Option<(u32, &mut T)> {
             let tree = unsafe { &*self.tree.get() };
             let block_counts: Vec<u32> = tree.lvl1.iter().map(|b| b.popcnt()).collect();
@@ -595,7 +583,7 @@ mod random {
             unsafe { Some((final_idx, &mut *self.data.add(final_idx as usize))) }
         }
 
-        /// Sélectionne N éléments occupés aléatoirement (avec remise possible).
+        /// Picks N random occupied elements (with replacement).
         pub fn random_occupied_many<R: Rng>(&self, rng: &mut R, count: usize) -> Vec<(u32, &T)> {
             let mut results = Vec::with_capacity(count);
             for _ in 0..count {
@@ -608,7 +596,7 @@ mod random {
             results
         }
 
-        /// Sélectionne N éléments occupés aléatoirement SANS remise.
+        /// Picks N random occupied elements without replacement.
         pub fn random_occupied_unique<R: Rng>(&self, rng: &mut R, count: usize) -> Vec<(u32, &T)> {
             let total = self.count_occupied();
             if count >= total {
@@ -692,7 +680,7 @@ pub struct TaggedHiSlab<T: 'static> {
 impl<T> TaggedHiSlab<T> {
     /// Creates a new empty `TaggedHiSlab`.
     ///
-    /// Voir [`HiSlab::new`] pour la sémantique de `initial_capacity` et `virtual_capacity`.
+    /// See [`HiSlab::new`] for the meaning of `initial_capacity` and `virtual_capacity`.
     pub fn new(initial_capacity: u32, virtual_capacity: u32) -> Result<Self, std::io::Error> {
         Ok(Self {
             inner: HiSlab::new(initial_capacity, virtual_capacity)?,
@@ -756,7 +744,7 @@ impl<T: 'static> TaggedHiSlab<T> {
         unsafe { self.inner.get_unchecked_mut(idx) }
     }
 
-    /// Voir [`HiSlab::copy_occupancy`].
+    /// See [`HiSlab::copy_occupancy`].
     pub fn copy_occupancy(&self, out: &mut Vec<u64>) -> u32 {
         self.inner.copy_occupancy(out)
     }
@@ -1025,11 +1013,7 @@ impl<'a, T: 'static> Iterator for TaggedIter<'a, T> {
                 self.block_idx += 1;
             }
 
-            if let Some(block) = self.lvl1.get(self.block_idx) {
-                self.current_word = block.data[self.word_idx];
-            } else {
-                return None;
-            }
+            self.current_word = self.lvl1.get(self.block_idx)?.data[self.word_idx];
         }
 
         let bit = self.current_word.trailing_zeros();
@@ -1082,11 +1066,7 @@ impl<'a, T> Iterator for TaggedIterMut<'a, T> {
                 self.block_idx += 1;
             }
 
-            if let Some(block) = self.lvl1.get(self.block_idx) {
-                self.current_word = block.data[self.word_idx];
-            } else {
-                return None;
-            }
+            self.current_word = self.lvl1.get(self.block_idx)?.data[self.word_idx];
         }
 
         let bit = self.current_word.trailing_zeros();
@@ -1103,28 +1083,28 @@ impl<'a, T> Iterator for TaggedIterMut<'a, T> {
 
 #[cfg(feature = "rand")]
 impl<T> TaggedHiSlab<T> {
-    /// Compte le nombre total d'éléments occupés.
+    /// Total number of occupied elements.
     #[inline]
     pub fn count_occupied(&self) -> usize {
         self.inner.count_occupied()
     }
 
-    /// Sélectionne un élément occupé aléatoirement.
+    /// Picks a random occupied element.
     pub fn random_occupied<R: rand::Rng>(&self, rng: &mut R) -> Option<(u32, &T)> {
         self.inner.random_occupied(rng)
     }
 
-    /// Sélectionne un élément occupé aléatoirement (version mutable).
+    /// Picks a random occupied element (mutable).
     pub fn random_occupied_mut<R: rand::Rng>(&mut self, rng: &mut R) -> Option<(u32, &mut T)> {
         self.inner.random_occupied_mut(rng)
     }
 
-    /// Sélectionne N éléments occupés aléatoirement (avec remise possible).
+    /// Picks N random occupied elements (with replacement).
     pub fn random_occupied_many<R: rand::Rng>(&self, rng: &mut R, count: usize) -> Vec<(u32, &T)> {
         self.inner.random_occupied_many(rng, count)
     }
 
-    /// Sélectionne N éléments occupés aléatoirement SANS remise.
+    /// Picks N random occupied elements without replacement.
     pub fn random_occupied_unique<R: rand::Rng>(
         &self,
         rng: &mut R,

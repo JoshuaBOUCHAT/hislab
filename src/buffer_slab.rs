@@ -1,16 +1,16 @@
 //! # BufferSlab
 //!
-//! Pool d'allocation de buffers de taille fixe avec tracking O(1) via bitmap hiérarchique.
+//! Pool of fixed-size buffers with O(1) tracking through a hierarchical bitmap.
 //!
 //! ## Design
 //!
-//! - `!Send + !Sync` via le raw ptr — single-thread ou wrapping explicite
-//! - `allocate(&self)` — plusieurs guards simultanés possible
-//! - `AutoGuard` libère automatiquement via `Drop` — pas de `free` manuel
-//! - Espace virtuel pré-réservé via `mmap` anonyme, pages initiales pré-faultées via
-//!   `madvise(MADV_POPULATE_WRITE)` — le ptr `storage` ne change jamais.
+//! - `!Send + !Sync` through the raw pointer: single-threaded, or wrap it explicitly
+//! - `allocate(&self)`: several guards can be alive at the same time
+//! - `AutoGuard` frees its slot on `Drop`: no manual `free`
+//! - Virtual space reserved up front with an anonymous `mmap`, initial pages pre-faulted
+//!   with `madvise(MADV_POPULATE_WRITE)`: the `storage` pointer never moves.
 //!
-//! ## Exemple
+//! ## Example
 //!
 //! ```
 //! use hislab::buffer_slab::BufferSlab;
@@ -18,11 +18,11 @@
 //! let pool = BufferSlab::<4096>::new(4, 128).unwrap();
 //!
 //! let mut g0 = pool.allocate();
-//! let mut g1 = pool.allocate(); // plusieurs guards simultanés
+//! let mut g1 = pool.allocate(); // several guards at once
 //! g0.as_slice_mut().fill(0xAB);
 //! assert_eq!(g0.index(), 0);
 //! assert_eq!(g1.index(), 1);
-//! // drop(g0) et drop(g1) libèrent automatiquement
+//! // dropping g0 and g1 frees their slots
 //! ```
 
 use std::cell::UnsafeCell;
@@ -35,23 +35,23 @@ use crate::bitmap_tree::BitmapTree;
 // BufferSlab
 // ============================================================================
 
-/// Pool de buffers de taille fixe `N` octets.
+/// Pool of fixed-size buffers of `N` bytes.
 ///
-/// L'espace virtuel est réservé entièrement à la construction via `mmap` anonyme.
-/// Les pages couvrant `initial_capacity` slots sont pré-faultées immédiatement via
-/// `madvise(MADV_POPULATE_WRITE)`. Les pages au-delà sont committées à la demande.
+/// The whole virtual space is reserved at construction with an anonymous `mmap`.
+/// The pages covering the first `initial_capacity` slots are pre-faulted right away
+/// with `madvise(MADV_POPULATE_WRITE)`; the following pages are committed on demand.
 ///
-/// `!Send + !Sync` par construction (champ `*mut u8`) — wrapping dans un
-/// `Mutex` ou `RwLock` est la responsabilité du caller si nécessaire.
+/// `!Send + !Sync` by construction (`*mut u8` field): wrapping it in a `Mutex` or
+/// `RwLock` is up to the caller if needed.
 pub struct BufferSlab<const N: usize> {
-    /// Ptr stable vers le début du stockage — jamais déplacé.
+    /// Stable pointer to the start of the storage; never moves.
     storage: *mut u8,
-    /// Limite max de slots — détermine la taille de la réservation virtuelle.
+    /// Maximum number of slots; sets the size of the virtual reservation.
     virtual_capacity: u32,
-    /// Bitmap hiérarchique de tracking. Mutable via &self grâce à UnsafeCell.
-    /// Sound car !Sync interdit tout accès concurrent.
+    /// Hierarchical tracking bitmap, mutable through `&self` via `UnsafeCell`.
+    /// Sound because `!Sync` forbids any concurrent access.
     tree: UnsafeCell<BitmapTree>,
-    /// Garde le mapping mmap en vie. Jamais modifié après construction.
+    /// Keeps the mmap mapping alive. Never modified after construction.
     _mmap: MmapMut,
 }
 
@@ -59,13 +59,12 @@ pub struct BufferSlab<const N: usize> {
 // AutoGuard
 // ============================================================================
 
-/// Guard RAII sur un buffer alloué dans un [`BufferSlab`].
+/// RAII guard over a buffer allocated from a [`BufferSlab`].
 ///
-/// Libère automatiquement le slot à la destruction via `Drop`.
-/// Tient `&'a BufferSlab` — le borrow checker garantit que la slab
-/// outlive le guard.
+/// Frees its slot automatically on `Drop`. Holds `&'a BufferSlab`, so the borrow
+/// checker guarantees the slab outlives the guard.
 ///
-/// Plusieurs guards peuvent coexister simultanément.
+/// Several guards can coexist.
 pub struct AutoGuard<'a, const N: usize> {
     ptr: *mut u8,
     idx: u32,
@@ -77,33 +76,33 @@ pub struct AutoGuard<'a, const N: usize> {
 // ============================================================================
 
 impl<const N: usize> BufferSlab<N> {
-    /// Crée un pool avec `virtual_capacity` slots réservés en espace virtuel.
+    /// Creates a pool with `virtual_capacity` slots reserved in virtual memory.
     ///
-    /// Les pages couvrant les `initial_capacity` premiers slots sont pré-faultées
-    /// immédiatement via `madvise(MADV_POPULATE_WRITE)` — zéro page fault lors des
-    /// premières allocations. Les pages au-delà sont committées à la demande par le kernel.
+    /// The pages covering the first `initial_capacity` slots are pre-faulted right away
+    /// with `madvise(MADV_POPULATE_WRITE)`, so the first allocations take no page fault.
+    /// The following pages are committed on demand by the kernel.
     ///
-    /// Le ptr de stockage ne se déplace jamais — les index retournés par `allocate`
-    /// sont stables pour toute la durée de vie du pool.
+    /// The storage pointer never moves: indices returned by `allocate` stay valid for
+    /// the whole lifetime of the pool.
     ///
     /// # Panics
     ///
-    /// - Si `initial_capacity > virtual_capacity`
-    /// - Si `virtual_capacity * N` dépasse `usize::MAX` — combinaison de paramètres
-    ///   invalide, impossible de réserver l'espace virtuel demandé
+    /// - If `initial_capacity > virtual_capacity`
+    /// - If `virtual_capacity * N` overflows `usize`: invalid parameters, the virtual
+    ///   space cannot be reserved
     ///
     /// # Errors
     ///
-    /// Retourne une erreur si `mmap` échoue (OOM système).
+    /// Returns an error if `mmap` fails (system out of memory).
     pub fn new(initial_capacity: u32, virtual_capacity: u32) -> Result<Self, std::io::Error> {
-        assert!(N > 0, "N doit être > 0");
+        assert!(N > 0, "N must be > 0");
         assert!(
             initial_capacity <= virtual_capacity,
-            "initial_capacity doit être <= virtual_capacity"
+            "initial_capacity must be <= virtual_capacity"
         );
 
-        // Panic intentionnel : virtual_capacity * N > usize::MAX est un bug appelant,
-        // pas une condition récupérable à runtime.
+        // Intentional panic: virtual_capacity * N > usize::MAX is a caller bug,
+        // not a condition to recover from at runtime.
         let virtual_bytes = (virtual_capacity as usize)
             .checked_mul(N)
             .expect("virtual_capacity * N dépasse usize::MAX");
@@ -111,17 +110,17 @@ impl<const N: usize> BufferSlab<N> {
         let mmap = MmapMut::map_anon(virtual_bytes)?;
         let storage = mmap.as_ptr() as *mut u8;
 
-        // Pré-faulter les pages initiales : évite les page faults sur les premières
-        // allocations. MADV_POPULATE_WRITE demande au kernel de résoudre les page faults
-        // en écriture immédiatement (Linux 5.14+). Best-effort : on ignore les erreurs
-        // (noyau trop ancien ou madvise non supporté).
+        // Pre-fault the initial pages so the first allocations take no page fault.
+        // MADV_POPULATE_WRITE asks the kernel to resolve write faults right away
+        // (Linux 5.14+). Best effort: errors are ignored (older kernel, unsupported
+        // madvise).
         if initial_capacity > 0 {
             let initial_bytes = initial_capacity as usize * N;
             unsafe {
                 libc::madvise(
                     storage as *mut libc::c_void,
                     initial_bytes,
-                    libc::MADV_POPULATE_WRITE|libc::MADV_HUGEPAGE,
+                    libc::MADV_POPULATE_WRITE | libc::MADV_HUGEPAGE,
                 );
             }
         }
@@ -134,25 +133,25 @@ impl<const N: usize> BufferSlab<N> {
         })
     }
 
-    /// Capacité virtuelle maximale (nombre de slots total réservé).
+    /// Maximum virtual capacity (total number of reserved slots).
     #[inline]
     pub fn virtual_capacity(&self) -> u32 {
         self.virtual_capacity
     }
 
-    /// Alloue un buffer libre et retourne son guard RAII.
+    /// Allocates a free buffer and returns its RAII guard.
     ///
-    /// Panics si `virtual_capacity` est atteinte (pool épuisé).
-    /// O(1) via le bitmap hiérarchique.
+    /// Panics if `virtual_capacity` is reached (pool exhausted).
+    /// O(1) through the hierarchical bitmap.
     #[inline]
     pub fn allocate(&self) -> AutoGuard<'_, N> {
         self.try_allocate()
             .expect("BufferSlab: virtual_capacity épuisée")
     }
 
-    /// Tente d'allouer un buffer libre. Retourne `None` si `virtual_capacity` est atteinte.
+    /// Tries to allocate a free buffer. Returns `None` if `virtual_capacity` is reached.
     ///
-    /// O(1) via le bitmap hiérarchique.
+    /// O(1) through the hierarchical bitmap.
     #[inline]
     pub fn try_allocate(&self) -> Option<AutoGuard<'_, N>> {
         let tree = unsafe { &mut *self.tree.get() };
@@ -162,10 +161,14 @@ impl<const N: usize> BufferSlab<N> {
         }
         tree.set_bit(idx);
         let ptr = unsafe { self.storage.add(idx as usize * N) };
-        Some(AutoGuard { ptr, idx, slab: self })
+        Some(AutoGuard {
+            ptr,
+            idx,
+            slab: self,
+        })
     }
 
-    /// Libère un slot par index. Appelé par `Drop` de [`AutoGuard`].
+    /// Frees a slot by index. Called by the `Drop` of [`AutoGuard`].
     #[inline]
     fn free_at(&self, idx: u32) {
         debug_assert!(
@@ -183,23 +186,24 @@ impl<const N: usize> BufferSlab<N> {
 
 impl<const N: usize> AutoGuard<'_, N> {
     #[inline(always)]
-    const fn is_ptr_power_of_two()->bool{
+    const fn is_ptr_power_of_two() -> bool {
         N.is_power_of_two()
     }
 
-
     #[inline(always)]
     unsafe fn hint_aligned(&self) {
-        // 1. On vérifie à la compilation si N est une puissance de 2
-        
-        // 2. LLVM ne verra le hint QUE si c'est vrai
+        // 1. Checked at compile time: is N a power of two?
+
+        // 2. LLVM only sees the hint when it is true
         if Self::is_ptr_power_of_two() {
-            // Utilise l'intrinsèque de LLVM pour l'alignement
-            unsafe{std::hint::assert_unchecked(self.ptr as usize & (N - 1) == 0);}
+            // LLVM intrinsic for the alignment hint
+            unsafe {
+                std::hint::assert_unchecked(self.ptr as usize & (N - 1) == 0);
+            }
         }
     }
 
-    /// Slice immutable sur les `N` octets du buffer.
+    /// Shared slice over the `N` bytes of the buffer.
     #[inline]
     pub fn as_slice(&self) -> &[u8] {
         unsafe {
@@ -208,7 +212,7 @@ impl<const N: usize> AutoGuard<'_, N> {
         }
     }
 
-    /// Slice mutable sur les `N` octets du buffer.
+    /// Mutable slice over the `N` bytes of the buffer.
     #[inline]
     pub fn as_slice_mut(&mut self) -> &mut [u8] {
         unsafe {
@@ -217,15 +221,15 @@ impl<const N: usize> AutoGuard<'_, N> {
         }
     }
 
-    /// Index du buffer dans le pool.
+    /// Index of the buffer in the pool.
     #[inline]
     pub fn index(&self) -> u32 {
         self.idx
     }
 
-    /// Pointeur brut vers le début du buffer.
+    /// Raw pointer to the start of the buffer.
     ///
-    /// Valide tant que le guard est en vie.
+    /// Valid while the guard is alive.
     #[inline]
     pub fn as_ptr(&self) -> *mut u8 {
         unsafe { self.hint_aligned() };
@@ -236,7 +240,7 @@ impl<const N: usize> AutoGuard<'_, N> {
 impl<const N: usize> Drop for AutoGuard<'_, N> {
     #[inline]
     fn drop(&mut self) {
-        self.slab.free_at(self.idx); 
+        self.slab.free_at(self.idx);
     }
 }
 
@@ -280,7 +284,7 @@ mod tests {
 
     #[test]
     fn test_beyond_initial_capacity() {
-        // Allouer au-delà de initial_capacity fonctionne (pages on-demand)
+        // Allocating beyond initial_capacity works (pages committed on demand)
         let pool = BufferSlab::<64>::new(2, 16).expect("should allocate");
         let guards: Vec<_> = (0..16).map(|_| pool.allocate()).collect();
         assert!(pool.try_allocate().is_none());

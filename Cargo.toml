@@ -1,6 +1,6 @@
 [package]
 name = "hislab"
-version = "0.2.2"
+version = "0.2.3"
 edition = "2024"
 authors = ["Joshua"]
 description = "A high-performance slab allocator with hierarchical bitmap for O(1) insert/remove operations"
@@ -10,6 +10,7 @@ documentation = "https://docs.rs/hislab"
 readme = "README.md"
 keywords = ["slab", "allocator", "bitmap", "simd", "data-structure"]
 categories = ["data-structures", "memory-management"]
+exclude = ["CLAUDE.md"]
 
 
 [dependencies]
