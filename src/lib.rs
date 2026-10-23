@@ -208,6 +208,30 @@ impl<T> HiSlab<T> {
         (words.len() * 64) as u32
     }
 
+    /// Number of slots covered by the occupancy bitmap: every occupied slot is
+    /// below it. Grows with the slab, never shrinks.
+    #[inline]
+    pub fn slot_span(&self) -> u32 {
+        (unsafe { &*self.tree.get() }.lvl1.len() << 9) as u32
+    }
+
+    /// First occupied slot at or after `from`, or `None`. Scans the level-1 bitmap
+    /// one 64-bit word at a time: resumable traversal by slices, e.g. a collector
+    /// visiting a bounded number of slots per call.
+    pub fn next_occupied(&self, from: u32) -> Option<u32> {
+        let lvl1 = &unsafe { &*self.tree.get() }.lvl1;
+        // SAFETY: see `copy_occupancy`, a `Vec<BitBlock>` is a contiguous run of u64.
+        let words =
+            unsafe { std::slice::from_raw_parts(lvl1.as_ptr() as *const u64, lvl1.len() * 8) };
+        let mut w = from as usize / 64;
+        let mut word = *words.get(w)? & (!0u64 << (from % 64));
+        while word == 0 {
+            w += 1;
+            word = *words.get(w)?;
+        }
+        Some((w * 64) as u32 + word.trailing_zeros())
+    }
+
     /// Iterates over all occupied slots with maximum performance.
     ///
     /// This is faster than using the iterator for simple operations
@@ -747,6 +771,17 @@ impl<T: 'static> TaggedHiSlab<T> {
     /// See [`HiSlab::copy_occupancy`].
     pub fn copy_occupancy(&self, out: &mut Vec<u64>) -> u32 {
         self.inner.copy_occupancy(out)
+    }
+
+    /// See [`HiSlab::slot_span`].
+    #[inline]
+    pub fn slot_span(&self) -> u32 {
+        self.inner.slot_span()
+    }
+
+    /// See [`HiSlab::next_occupied`].
+    pub fn next_occupied(&self, from: u32) -> Option<u32> {
+        self.inner.next_occupied(from)
     }
 
     /// Iterates over all occupied slots with maximum performance.

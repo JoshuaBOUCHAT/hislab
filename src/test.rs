@@ -624,3 +624,28 @@ fn copy_occupancy_matches_is_occupied() {
         assert_eq!(bit, slab.is_occupied(i), "slot {i}");
     }
 }
+
+#[test]
+fn next_occupied_walks_all_occupied_slots() {
+    let slab: TaggedHiSlab<u64> = TaggedHiSlab::new(0, 1 << 20).unwrap();
+    assert_eq!(slab.next_occupied(0), None);
+    let idx: Vec<u32> = (0..5000).map(|i| slab.insert(i)).collect();
+    // trous de toutes tailles, dont des mots de 64 et un bloc de 512 entiers vides
+    for &i in &idx {
+        if i % 3 == 0 || (700..1300).contains(&i) || i > 4900 {
+            slab.remove(i);
+        }
+    }
+    let expect: Vec<u32> = (0..slab.slot_span()).filter(|&i| slab.is_occupied(i)).collect();
+    let mut got = Vec::new();
+    let mut from = 0;
+    while let Some(i) = slab.next_occupied(from) {
+        got.push(i);
+        from = i + 1;
+    }
+    assert_eq!(got, expect);
+    assert!(slab.slot_span() >= 5000 && slab.slot_span() % 512 == 0);
+    assert_eq!(slab.next_occupied(slab.slot_span()), None);
+    assert_eq!(slab.next_occupied(u32::MAX), None);
+    assert_eq!(slab.next_occupied(701), Some(1300));
+}
