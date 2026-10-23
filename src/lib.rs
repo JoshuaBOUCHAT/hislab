@@ -186,6 +186,63 @@ impl<T> HiSlab<T> {
         Some(dst)
     }
 
+    /// Highest occupied slot strictly below `below`, or `None`.
+    pub fn prev_occupied(&self, below: u32) -> Option<u32> {
+        if below == 0 {
+            return None;
+        }
+        let lvl1 = &unsafe { &*self.tree.get() }.lvl1;
+        // SAFETY: see `copy_occupancy`.
+        let words =
+            unsafe { std::slice::from_raw_parts(lvl1.as_ptr() as *const u64, lvl1.len() * 8) };
+        let last = (below - 1) as usize;
+        let mut w = (last / 64).min(words.len().checked_sub(1)?);
+        let mut word = if w == last / 64 { words[w] & (u64::MAX >> (63 - last % 64)) } else { words[w] };
+        loop {
+            if word != 0 {
+                return Some((w * 64) as u32 + 63 - word.leading_zeros());
+            }
+            w = w.checked_sub(1)?;
+            word = words[w];
+        }
+    }
+
+    /// Compaction in a pipeline: reserves the lowest free slot without writing it (its
+    /// bit is set, its content undefined until [`HiSlab::move_to`]).
+    ///
+    /// # Safety
+    /// The slot is filled by `move_to` or given back by [`HiSlab::unreserve`] before any
+    /// other use of the slab.
+    pub unsafe fn reserve_lowest(&self) -> u32 {
+        unsafe { &mut *self.tree.get() }.reserve_free_idx()
+    }
+
+    /// Gives back a slot reserved by [`HiSlab::reserve_lowest`] and never filled.
+    ///
+    /// # Safety
+    /// `idx` was reserved and not filled.
+    pub unsafe fn unreserve(&self, idx: u32) {
+        unsafe { &mut *self.tree.get() }.clear_bit(idx);
+    }
+
+    /// Moves the element of the occupied slot `src` into the reserved slot `dst` (bitwise).
+    ///
+    /// # Safety
+    /// `src` is occupied, `dst` reserved by [`HiSlab::reserve_lowest`], no reference into the
+    /// slab is alive.
+    pub unsafe fn move_to(&self, src: u32, dst: u32) {
+        unsafe {
+            std::ptr::copy_nonoverlapping(self.data.add(src as usize), self.data.add(dst as usize), 1);
+            (*self.tree.get()).clear_bit(src);
+        }
+    }
+
+    /// Address of slot `idx`, for prefetching (no check, never dereferenced here).
+    #[inline(always)]
+    pub fn slot_ptr(&self, idx: u32) -> *const T {
+        self.data.wrapping_add(idx as usize)
+    }
+
     /// Returns to the system the memory of every whole 2 MiB page lying at or above slot
     /// `from` (`madvise(MADV_DONTNEED)`; the pages fault back in, zeroed, if slots there
     /// are used again). Returns the bytes released.
@@ -877,6 +934,46 @@ impl<T: 'static> TaggedHiSlab<T> {
             tags.set_bit(dst);
         }
         Some(dst)
+    }
+
+    /// See [`HiSlab::prev_occupied`].
+    pub fn prev_occupied(&self, below: u32) -> Option<u32> {
+        self.inner.prev_occupied(below)
+    }
+
+    /// See [`HiSlab::reserve_lowest`].
+    ///
+    /// # Safety
+    /// Same as [`HiSlab::reserve_lowest`].
+    pub unsafe fn reserve_lowest(&self) -> u32 {
+        unsafe { self.inner.reserve_lowest() }
+    }
+
+    /// See [`HiSlab::unreserve`].
+    ///
+    /// # Safety
+    /// Same as [`HiSlab::unreserve`].
+    pub unsafe fn unreserve(&self, idx: u32) {
+        unsafe { self.inner.unreserve(idx) }
+    }
+
+    /// See [`HiSlab::move_to`]. The tag follows the element.
+    ///
+    /// # Safety
+    /// Same as [`HiSlab::move_to`].
+    pub unsafe fn move_to(&self, src: u32, dst: u32) {
+        unsafe { self.inner.move_to(src, dst) };
+        let tags = unsafe { &mut *self.tagged_tree.get() };
+        if tags.is_set(src) {
+            tags.clear_bit(src);
+            tags.set_bit(dst);
+        }
+    }
+
+    /// See [`HiSlab::slot_ptr`].
+    #[inline(always)]
+    pub fn slot_ptr(&self, idx: u32) -> *const T {
+        self.inner.slot_ptr(idx)
     }
 
     /// See [`HiSlab::release_above`].

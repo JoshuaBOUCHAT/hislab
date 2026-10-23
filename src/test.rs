@@ -695,3 +695,28 @@ fn compaction_primitives() {
     assert_eq!(slab.len(), 105_000);
     assert_eq!(unsafe { *slab.get_unchecked(104_999) }, [79_999; 16]);
 }
+
+#[test]
+fn pipelined_compaction_primitives() {
+    let slab: TaggedHiSlab<[u64; 16]> = TaggedHiSlab::new(0, 1 << 20).unwrap();
+    for i in 0..2_000u64 {
+        slab.insert([i; 16]);
+    }
+    for i in (0..2_000).filter(|i| i % 3 != 0) {
+        slab.remove(i);
+    }
+    slab.tag(1_998);
+    assert_eq!(slab.prev_occupied(2_000), Some(1_998));
+    assert_eq!(slab.prev_occupied(1_998), Some(1_995));
+    assert_eq!(slab.prev_occupied(64), Some(63));
+    assert_eq!(slab.prev_occupied(1), Some(0));
+    assert_eq!(slab.prev_occupied(0), None);
+    let (a, b) = unsafe { (slab.reserve_lowest(), slab.reserve_lowest()) };
+    assert_eq!((a, b), (1, 2));
+    unsafe { slab.unreserve(b) };
+    unsafe { slab.move_to(1_998, a) };
+    assert!(slab.is_occupied(1) && !slab.is_occupied(2) && !slab.is_occupied(1_998));
+    assert_eq!(unsafe { *slab.get_unchecked(1) }, [1_998; 16]);
+    assert!(slab.is_tagged(1) && !slab.is_tagged(1_998));
+    assert_eq!(slab.slot_ptr(3) as usize - slab.slot_ptr(1) as usize, 256);
+}
