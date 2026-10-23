@@ -17,7 +17,7 @@
 //! assert!(slab.get(idx).is_none());
 //! ```
 
-use std::cell::UnsafeCell;
+use std::cell::{Cell, UnsafeCell};
 use std::ops::{Index, IndexMut};
 
 use crate::bit_block::BitBlock;
@@ -53,6 +53,11 @@ pub struct HiSlab<T: 'static> {
     /// Sound because `!Sync` forbids any concurrent access.
     pub(crate) tree: UnsafeCell<BitmapTree>,
     mmap: MmapMut,
+    /// Slots occupés.
+    len: Cell<u32>,
+    /// Au-delà de ce slot, rien n'a jamais été écrit (ou tout a été rendu) : borne de
+    /// [`HiSlab::release_above`].
+    touched_end: Cell<u32>,
 }
 
 impl<T> HiSlab<T> {
@@ -99,6 +104,8 @@ impl<T> HiSlab<T> {
             virtual_capacity,
             tree: UnsafeCell::new(BitmapTree::new()),
             mmap,
+            len: Cell::new(0),
+            touched_end: Cell::new(initial_capacity),
         })
     }
 }
@@ -117,6 +124,10 @@ impl<T> HiSlab<T> {
             "HiSlab: virtual_capacity épuisée"
         );
         unsafe { std::ptr::write(self.data.add(idx as usize), val) };
+        self.len.set(self.len.get() + 1);
+        if idx >= self.touched_end.get() {
+            self.touched_end.set(idx + 1);
+        }
         idx
     }
 
@@ -129,7 +140,71 @@ impl<T> HiSlab<T> {
         }
         // SAFETY: !Sync guarantees single-threaded access.
         unsafe { &mut *self.tree.get() }.clear_bit(idx);
+        self.len.set(self.len.get() - 1);
         Some(unsafe { std::ptr::read(self.data.add(idx as usize)) })
+    }
+
+    /// Number of occupied slots.
+    #[inline]
+    pub fn len(&self) -> u32 {
+        self.len.get()
+    }
+
+    /// `true` if no slot is occupied.
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.len.get() == 0
+    }
+
+    /// Highest occupied slot, or `None` if the slab is empty. Scans the level-1 bitmap
+    /// downwards one 64-bit word at a time.
+    pub fn last_occupied(&self) -> Option<u32> {
+        let lvl1 = &unsafe { &*self.tree.get() }.lvl1;
+        // SAFETY: see `copy_occupancy`, a `Vec<BitBlock>` is a contiguous run of u64.
+        let words =
+            unsafe { std::slice::from_raw_parts(lvl1.as_ptr() as *const u64, lvl1.len() * 8) };
+        let w = words.iter().rposition(|&w| w != 0)?;
+        Some((w * 64) as u32 + 63 - words[w].leading_zeros())
+    }
+
+    /// Compaction: moves the element of the occupied slot `src` into the lowest free slot,
+    /// if that slot is below `src`, and returns it (`None`: no free slot below, nothing
+    /// moved). The value is moved bitwise: the caller fixes whatever refers to `src`.
+    ///
+    /// # Safety
+    /// `src` is occupied, and no reference into the slab is alive.
+    pub unsafe fn move_down(&self, src: u32) -> Option<u32> {
+        debug_assert!(self.is_occupied(src));
+        let tree = unsafe { &mut *self.tree.get() };
+        let dst = tree.find_free_idx();
+        if dst >= src {
+            return None;
+        }
+        tree.set_bit(dst);
+        unsafe { std::ptr::copy_nonoverlapping(self.data.add(src as usize), self.data.add(dst as usize), 1) };
+        tree.clear_bit(src);
+        Some(dst)
+    }
+
+    /// Returns to the system the memory of every whole 2 MiB page lying at or above slot
+    /// `from` (`madvise(MADV_DONTNEED)`; the pages fault back in, zeroed, if slots there
+    /// are used again). Returns the bytes released.
+    ///
+    /// # Safety
+    /// Every slot at or above `from` is free.
+    pub unsafe fn release_above(&self, from: u32) -> usize {
+        const PAGE: usize = 2 << 20;
+        debug_assert!(self.last_occupied().is_none_or(|l| l < from));
+        let size = std::mem::size_of::<T>();
+        let base = self.data as usize;
+        let start = (base + from as usize * size).next_multiple_of(PAGE);
+        let end = (base + self.touched_end.get() as usize * size).next_multiple_of(PAGE);
+        if end <= start {
+            return 0;
+        }
+        unsafe { libc::madvise(start as *mut libc::c_void, end - start, libc::MADV_DONTNEED) };
+        self.touched_end.set(((start - base) / size) as u32);
+        end - start
     }
 
     /// Returns `true` if the slot at the given index is occupied.
@@ -771,6 +846,45 @@ impl<T: 'static> TaggedHiSlab<T> {
     /// See [`HiSlab::copy_occupancy`].
     pub fn copy_occupancy(&self, out: &mut Vec<u64>) -> u32 {
         self.inner.copy_occupancy(out)
+    }
+
+    /// See [`HiSlab::len`].
+    #[inline]
+    pub fn len(&self) -> u32 {
+        self.inner.len()
+    }
+
+    /// See [`HiSlab::is_empty`].
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.inner.is_empty()
+    }
+
+    /// See [`HiSlab::last_occupied`].
+    pub fn last_occupied(&self) -> Option<u32> {
+        self.inner.last_occupied()
+    }
+
+    /// See [`HiSlab::move_down`]. The tag follows the element.
+    ///
+    /// # Safety
+    /// Same as [`HiSlab::move_down`].
+    pub unsafe fn move_down(&self, src: u32) -> Option<u32> {
+        let dst = unsafe { self.inner.move_down(src) }?;
+        let tags = unsafe { &mut *self.tagged_tree.get() };
+        if tags.is_set(src) {
+            tags.clear_bit(src);
+            tags.set_bit(dst);
+        }
+        Some(dst)
+    }
+
+    /// See [`HiSlab::release_above`].
+    ///
+    /// # Safety
+    /// Same as [`HiSlab::release_above`].
+    pub unsafe fn release_above(&self, from: u32) -> usize {
+        unsafe { self.inner.release_above(from) }
     }
 
     /// See [`HiSlab::slot_span`].

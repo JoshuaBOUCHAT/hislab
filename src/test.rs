@@ -649,3 +649,49 @@ fn next_occupied_walks_all_occupied_slots() {
     assert_eq!(slab.next_occupied(u32::MAX), None);
     assert_eq!(slab.next_occupied(701), Some(1300));
 }
+
+#[test]
+fn compaction_primitives() {
+    // 128 o par slot, comme les nœuds d'oxidart : 100K slots = 12,8 Mo
+    let slab: TaggedHiSlab<[u64; 16]> = TaggedHiSlab::new(0, 1 << 20).unwrap();
+    assert_eq!((slab.len(), slab.last_occupied()), (0, None));
+    let idx: Vec<u32> = (0..100_000u64).map(|i| slab.insert([i; 16])).collect();
+    assert_eq!(slab.len(), 100_000);
+    assert_eq!(slab.last_occupied(), Some(99_999));
+    for &i in &idx {
+        if i % 4 != 0 {
+            slab.remove(i);
+        }
+    }
+    slab.tag(99_996);
+    assert_eq!(slab.len(), 25_000);
+    assert_eq!(slab.last_occupied(), Some(99_996));
+    // Compactage : le plus haut descend dans le plus bas trou, le tag suit.
+    let dst = unsafe { slab.move_down(99_996) }.unwrap();
+    assert_eq!(dst, 1);
+    assert!(!slab.is_occupied(99_996) && slab.is_occupied(1));
+    assert_eq!(unsafe { *slab.get_unchecked(1) }, [99_996; 16]);
+    assert!(slab.is_tagged(1) && !slab.is_tagged(99_996));
+    assert_eq!(slab.len(), 25_000);
+    // Jusqu'au bout : plus aucun trou sous le dernier.
+    while let Some(last) = slab.last_occupied() {
+        if unsafe { slab.move_down(last) }.is_none() {
+            break;
+        }
+    }
+    assert_eq!(slab.last_occupied(), Some(24_999));
+    let mut seen: Vec<u64> = (0..25_000).map(|i| unsafe { slab.get_unchecked(i)[0] }).collect();
+    seen.sort_unstable();
+    assert!(seen.iter().zip((0..100_000).step_by(4)).all(|(&a, b)| a == b), "valeurs intactes");
+    // Rendu de la fin : pages entières au-dessus du dernier occupé.
+    let released = unsafe { slab.release_above(25_000) };
+    assert_eq!(released % (2 << 20), 0);
+    assert!(released >= 8 << 20, "12,8 Mo touchés, 3,2 Mo gardés : au moins 4 pages rendues");
+    assert_eq!(unsafe { slab.release_above(25_000) }, 0, "déjà rendu");
+    // Réutilisation après rendu : les slots se remplissent à nouveau.
+    for i in 0..80_000u64 {
+        slab.insert([i; 16]);
+    }
+    assert_eq!(slab.len(), 105_000);
+    assert_eq!(unsafe { *slab.get_unchecked(104_999) }, [79_999; 16]);
+}
