@@ -235,6 +235,9 @@ impl<T> HiSlab<T> {
             std::ptr::copy_nonoverlapping(self.data.add(src as usize), self.data.add(dst as usize), 1);
             (*self.tree.get()).clear_bit(src);
         }
+        if dst >= self.touched_end.get() {
+            self.touched_end.set(dst + 1);
+        }
     }
 
     /// Address of slot `idx`, for prefetching (no check, never dereferenced here).
@@ -345,6 +348,15 @@ impl<T> HiSlab<T> {
     #[inline]
     pub fn slot_span(&self) -> u32 {
         (unsafe { &*self.tree.get() }.lvl1.len() << 9) as u32
+    }
+
+    /// Bytes of the slot range ever written and not handed back by
+    /// [`HiSlab::release_above`]: what the slab's data can hold resident (memory
+    /// accounting; the pages are committed by the kernel on first write, without any
+    /// allocator call). The bitmaps live on the heap and are not included.
+    #[inline]
+    pub fn touched_bytes(&self) -> usize {
+        self.touched_end.get() as usize * std::mem::size_of::<T>()
     }
 
     /// First occupied slot at or after `from`, or `None`. Scans the level-1 bitmap
@@ -988,6 +1000,12 @@ impl<T: 'static> TaggedHiSlab<T> {
     #[inline]
     pub fn slot_span(&self) -> u32 {
         self.inner.slot_span()
+    }
+
+    /// See [`HiSlab::touched_bytes`].
+    #[inline]
+    pub fn touched_bytes(&self) -> usize {
+        self.inner.touched_bytes()
     }
 
     /// See [`HiSlab::next_occupied`].

@@ -683,9 +683,15 @@ fn compaction_primitives() {
     let mut seen: Vec<u64> = (0..25_000).map(|i| unsafe { slab.get_unchecked(i)[0] }).collect();
     seen.sort_unstable();
     assert!(seen.iter().zip((0..100_000).step_by(4)).all(|(&a, b)| a == b), "valeurs intactes");
+    // Octets touchés : tout ce qui a été écrit, trous compris, jusqu'au rendu.
+    assert_eq!(slab.touched_bytes(), 100_000 * 128);
     // Rendu de la fin : pages entières au-dessus du dernier occupé.
     let released = unsafe { slab.release_above(25_000) };
     assert_eq!(released % (2 << 20), 0);
+    // le rendu va jusqu'à la page qui suit le dernier écrit : au plus une page de plus
+    let after = slab.touched_bytes();
+    assert!(after + released >= 100_000 * 128 && after + released < 100_000 * 128 + (2 << 20));
+    assert!(slab.touched_bytes() >= 25_000 * 128, "les occupés restent comptés");
     assert!(released >= 8 << 20, "12,8 Mo touchés, 3,2 Mo gardés : au moins 4 pages rendues");
     assert_eq!(unsafe { slab.release_above(25_000) }, 0, "déjà rendu");
     // Réutilisation après rendu : les slots se remplissent à nouveau.
@@ -694,6 +700,7 @@ fn compaction_primitives() {
     }
     assert_eq!(slab.len(), 105_000);
     assert_eq!(unsafe { *slab.get_unchecked(104_999) }, [79_999; 16]);
+    assert_eq!(slab.touched_bytes(), 105_000 * 128);
 }
 
 #[test]
