@@ -359,6 +359,28 @@ impl<T> HiSlab<T> {
         self.touched_end.get() as usize * std::mem::size_of::<T>()
     }
 
+    /// Bytes of the slab's data actually resident, measured with `mincore` over the
+    /// touched range up to the next 2 MiB boundary (a transparent huge page taken on
+    /// first write spills up to it). One syscall and one byte per 4 KiB: for statistics,
+    /// not for hot paths. Falls back to [`HiSlab::touched_bytes`] if `mincore` fails.
+    pub fn resident_bytes(&self) -> usize {
+        const PAGE: usize = 4096;
+        let touched = self.touched_bytes();
+        if touched == 0 {
+            return 0;
+        }
+        let base = self.data as usize;
+        let end = (base + touched).next_multiple_of(2 << 20).min(base + self.mmap.len());
+        let len = end.next_multiple_of(PAGE) - base;
+        let mut vec = vec![0u8; len / PAGE];
+        // SAFETY: `[base, base + len)` lies in the slab's mapping (page-aligned base).
+        let r = unsafe { libc::mincore(base as *mut libc::c_void, len, vec.as_mut_ptr()) };
+        if r != 0 {
+            return touched;
+        }
+        vec.iter().filter(|&&v| v & 1 != 0).count() * PAGE
+    }
+
     /// First occupied slot at or after `from`, or `None`. Scans the level-1 bitmap
     /// one 64-bit word at a time: resumable traversal by slices, e.g. a collector
     /// visiting a bounded number of slots per call.
@@ -1006,6 +1028,11 @@ impl<T: 'static> TaggedHiSlab<T> {
     #[inline]
     pub fn touched_bytes(&self) -> usize {
         self.inner.touched_bytes()
+    }
+
+    /// See [`HiSlab::resident_bytes`].
+    pub fn resident_bytes(&self) -> usize {
+        self.inner.resident_bytes()
     }
 
     /// See [`HiSlab::next_occupied`].

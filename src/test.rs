@@ -685,6 +685,8 @@ fn compaction_primitives() {
     assert!(seen.iter().zip((0..100_000).step_by(4)).all(|(&a, b)| a == b), "valeurs intactes");
     // Octets touchés : tout ce qui a été écrit, trous compris, jusqu'au rendu.
     assert_eq!(slab.touched_bytes(), 100_000 * 128);
+    let resident = slab.resident_bytes();
+    assert!(resident >= 100_000 * 128 && resident <= 100_000 * 128 + (2 << 20) + 4096, "{resident}");
     // Rendu de la fin : pages entières au-dessus du dernier occupé.
     let released = unsafe { slab.release_above(25_000) };
     assert_eq!(released % (2 << 20), 0);
@@ -692,6 +694,7 @@ fn compaction_primitives() {
     let after = slab.touched_bytes();
     assert!(after + released >= 100_000 * 128 && after + released < 100_000 * 128 + (2 << 20));
     assert!(slab.touched_bytes() >= 25_000 * 128, "les occupés restent comptés");
+    assert!(slab.resident_bytes() <= slab.touched_bytes() + (2 << 20), "le rendu se voit au mincore");
     assert!(released >= 8 << 20, "12,8 Mo touchés, 3,2 Mo gardés : au moins 4 pages rendues");
     assert_eq!(unsafe { slab.release_above(25_000) }, 0, "déjà rendu");
     // Réutilisation après rendu : les slots se remplissent à nouveau.
